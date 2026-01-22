@@ -24,6 +24,12 @@ class ChunkingConfig:
     min_chunk_chars: int = 200
     remove_docling_placeholders: bool = True
 
+    # semantic chunking (langchain)
+    semantic_breakpoint_threshold_type: str = "percentile"  # 'percentile' | 'standard_deviation' | 'interquartile'
+    semantic_embeddings_model: str = "nomic-embed-text"
+    semantic_ollama_base_url: str = "http://localhost:11434"
+    semantic_scope: str = "section"  # 'section' ou 'page'
+
     # markers
     appendix_markers: Tuple[str, ...] = ("annexe", "annexes", "appendix", "appendice")
     bibliography_markers: Tuple[str, ...] = ("bibliographie", "references", "sources", "références", "bibliography")
@@ -64,7 +70,7 @@ def _is_marker_present(title: str, markers: Tuple[str, ...], *, allow_long_title
     - allow_long_title=True: marker presence is enough (used for Conclusion)
     """
     t = (title or "").lower().strip()
-    t_clean = re.sub(r'^[\d\.]+\s*', '', t).strip()
+    t_clean = re.sub(r"^[\d\.]+\s*", "", t).strip()
 
     for m in markers:
         pattern = rf"\b{re.escape(m)}\b"
@@ -86,7 +92,7 @@ def _is_conclusion_heading(title: str, cfg: ChunkingConfig) -> bool:
 # =========================
 # Helpers Structure (Extraction par blocs)
 # =========================
-_TABLE_RE = re.compile(r'((?:\n|^)\|.*\|(?:\n\|.*\|)+)', re.MULTILINE)
+_TABLE_RE = re.compile(r"((?:\n|^)\|.*\|(?:\n\|.*\|)+)", re.MULTILINE)
 
 
 def _extract_blocks(text: str) -> List[Dict[str, Any]]:
@@ -97,7 +103,7 @@ def _extract_blocks(text: str) -> List[Dict[str, Any]]:
     for match in _TABLE_RE.finditer(text):
         prev_text = text[last_idx:match.start()].strip()
         if prev_text:
-            for p in re.split(r'\n{2,}', prev_text):
+            for p in re.split(r"\n{2,}", prev_text):
                 p_clean = p.strip()
                 if p_clean:
                     blocks.append({
@@ -108,8 +114,8 @@ def _extract_blocks(text: str) -> List[Dict[str, Any]]:
 
         table_title = "Tableau sans titre"
         if blocks and blocks[-1]["type"] == "paragraph":
-            lines = blocks[-1]["content"].split('\n')
-            if re.search(r'^(Tableau|Table|Tab\.)\s*[:\d]', lines[-1].strip(), re.I):
+            lines = blocks[-1]["content"].split("\n")
+            if re.search(r"^(Tableau|Table|Tab\.)\s*[:\d]", lines[-1].strip(), re.I):
                 table_title = lines[-1].strip()
                 rem = "\n".join(lines[:-1]).strip()
                 if rem:
@@ -127,7 +133,7 @@ def _extract_blocks(text: str) -> List[Dict[str, Any]]:
 
     rem = text[last_idx:].strip()
     if rem:
-        for p in re.split(r'\n{2,}', rem):
+        for p in re.split(r"\n{2,}", rem):
             p_clean = p.strip()
             if p_clean:
                 blocks.append({
@@ -202,7 +208,188 @@ class Chunk:
 
 
 # =========================
-# Main
+# Semantic splitter (LangChain)
+# =========================
+def _make_semantic_splitter(cfg: ChunkingConfig):
+    """
+    Crée un SemanticChunker basé sur un embeddings provider.
+    Essaie OllamaEmbeddings (langchain-community) puis fallback HTTP /api/embeddings.
+    """
+    from langchain_experimental.text_splitter import SemanticChunker
+
+    try:
+        from langchain_community.embeddings import OllamaEmbeddings
+        emb = OllamaEmbeddings(model=cfg.semantic_embeddings_model, base_url=cfg.semantic_ollama_base_url)
+    except Exception:
+        import requests
+        from langchain_core.embeddings import Embeddings
+
+        class _OllamaEmbeddingsWrapper(Embeddings):
+            def __init__(self, model: str, base_url: str):
+                self.model = model
+                self.base_url = base_url.rstrip("/")
+
+            def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                return [self._embed(t) for t in texts]
+
+            def embed_query(self, text: str) -> List[float]:
+                return self._embed(text)
+
+            def _embed(self, text: str) -> List[float]:
+                r = requests.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": self.model, "prompt": text},
+                    timeout=120,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if "embedding" not in data:
+                    raise ValueError(f"Unexpected Ollama response keys: {list(data.keys())}")
+                return data["embedding"]
+
+        emb = _OllamaEmbeddingsWrapper(cfg.semantic_embeddings_model, cfg.semantic_ollama_base_url)
+
+    return SemanticChunker(
+        emb,
+        breakpoint_threshold_type=cfg.semantic_breakpoint_threshold_type,
+    )
+
+
+# =========================
+# Chunking: Semantic
+# =========================
+def semantic_chunk_from_extract_result(res: Any, cfg: Optional[ChunkingConfig] = None) -> List[Chunk]:
+    cfg = cfg or ChunkingConfig()
+    md = res.artifacts.get("markdown_final") or res.artifacts.get("markdown_base") or ""
+    if not isinstance(md, str):
+        md = str(md)
+
+    source = getattr(res, "source", "unknown")
+
+    # pages
+    pages_raw = md.split("<!-- page_break -->")
+    page_map = {i + 1: p.replace("<!-- page_break -->", "").strip() for i, p in enumerate(pages_raw)}
+
+    # sections (pour garder section_path / section_title)
+    all_sections = _add_section_paths(_extract_sections(md, cfg))
+
+    # cutoff après conclusion
+    conclusion_idx = None
+    for i, s in enumerate(all_sections):
+        if _is_conclusion_heading(s["title"], cfg):
+            conclusion_idx = i
+            break
+
+    conclusion_cutoff_pos = None
+    if conclusion_idx is not None and cfg.stop_after_conclusion:
+        conclusion_cutoff_pos = all_sections[conclusion_idx + 1]["start"] if (conclusion_idx + 1) < len(all_sections) else len(md)
+
+    splitter = _make_semantic_splitter(cfg)
+    chunks: List[Chunk] = []
+
+    if cfg.semantic_scope == "page":
+        # semantic par page (souvent le meilleur défaut en perf/stabilité)
+        for page_no, page_text in page_map.items():
+            t = (page_text or "").strip()
+            if len(t) < cfg.min_chunk_chars:
+                continue
+
+            sem_texts = [d.page_content for d in splitter.create_documents([t])]
+
+            for ci, chunk_text in enumerate(sem_texts):
+                chunk_text = (chunk_text or "").strip()
+                if len(chunk_text) < cfg.min_chunk_chars:
+                    continue
+
+                chunks.append(Chunk(
+                    id=f"{source}::p{page_no}::sem{ci}",
+                    source=source,
+                    section_path="document",
+                    section_title="document",
+                    text=chunk_text,
+                    page_no=int(page_no),
+                    meta={
+                        "type": "text",
+                        "chunking": "semantic",
+                        "scope": "page",
+                        "embeddings_model": cfg.semantic_embeddings_model,
+                        "breakpoint_threshold_type": cfg.semantic_breakpoint_threshold_type,
+                        "tokens_est": _count_tokens(chunk_text, cfg),
+                        "page_context": f"Contenu extrait (semantic) de la page {page_no}",
+                        "full_page_text": page_map.get(page_no, ""),
+                    }
+                ))
+
+        return chunks
+
+    # semantic par section
+    in_excluded_zone = False
+
+    for si, sec in enumerate(all_sections):
+        sec_start_pos = sec["start"]
+        if conclusion_cutoff_pos is not None and sec_start_pos >= conclusion_cutoff_pos:
+            break
+
+        path = sec["section_path"]
+        title = sec["title"]
+
+        # exclusions biblio/annexe + stop_after_appendix_start (même logique que structure)
+        is_bib = _is_marker_present(title, cfg.bibliography_markers)
+        is_app = _is_marker_present(title, cfg.appendix_markers) or _is_marker_present(path.split(" > ")[0], cfg.appendix_markers)
+
+        if (is_bib or is_app) and (si / max(1, len(all_sections)) > 0.4):
+            if sec["level"] <= 2:
+                in_excluded_zone = True
+
+        if in_excluded_zone and cfg.stop_after_appendix_start:
+            break
+
+        if (is_bib and cfg.drop_bibliography) or (is_app and cfg.drop_appendix):
+            continue
+
+        sec_text = (sec["text"] or "").replace("<!-- page_break -->", "").strip()
+        if len(sec_text) < cfg.min_chunk_chars:
+            continue
+
+        # page_no approx (début de section)
+        page_no = md[:sec_start_pos].count("<!-- page_break -->") + 1
+
+        sem_texts = [d.page_content for d in splitter.create_documents([sec_text])]
+
+        for ci, chunk_text in enumerate(sem_texts):
+            chunk_text = (chunk_text or "").strip()
+            if len(chunk_text) < cfg.min_chunk_chars:
+                continue
+
+            chunks.append(Chunk(
+                id=f"{source}::s{si}::sem{ci}",
+                source=source,
+                section_path=path,
+                section_title=title,
+                text=chunk_text,
+                page_no=int(page_no),
+                meta={
+                    "type": "text",
+                    "chunking": "semantic",
+                    "scope": "section",
+                    "embeddings_model": cfg.semantic_embeddings_model,
+                    "breakpoint_threshold_type": cfg.semantic_breakpoint_threshold_type,
+                    "abs_pos": int(sec_start_pos),
+                    "tokens_est": _count_tokens(chunk_text, cfg),
+                    "page_context": f"Contenu extrait (semantic) autour de la page {page_no}",
+                    "full_page_text": page_map.get(page_no, ""),
+                }
+            ))
+
+    # Hard filter after conclusion cutoff only meaningful for section-scope (abs_pos exists)
+    if conclusion_cutoff_pos is not None and cfg.semantic_scope == "section":
+        chunks = [c for c in chunks if int(c.meta.get("abs_pos", 0)) < conclusion_cutoff_pos]
+
+    return chunks
+
+
+# =========================
+# Chunking: Structure (ton chunker actuel)
 # =========================
 def chunk_from_extract_result(res: Any, cfg: Optional[ChunkingConfig] = None) -> List[Chunk]:
     cfg = cfg or ChunkingConfig()
@@ -334,6 +521,20 @@ def chunk_from_extract_result(res: Any, cfg: Optional[ChunkingConfig] = None) ->
     return out
 
 
+# =========================
+# Dispatcher
+# =========================
+def chunk_dispatch(res: Any, *, cfg: Optional[ChunkingConfig] = None, strategy: str = "structure") -> List[Chunk]:
+    if strategy == "structure":
+        return chunk_from_extract_result(res, cfg=cfg)
+    if strategy == "semantic":
+        return semantic_chunk_from_extract_result(res, cfg=cfg)
+    raise ValueError("strategy must be 'structure' or 'semantic'")
+
+
+# =========================
+# Helper: build chunk
+# =========================
 def _build_chunk_with_page(
     buffer: List[Tuple[str, int, int]],
     si: int,
