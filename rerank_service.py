@@ -16,7 +16,7 @@ from FlagEmbedding import FlagReranker
 # -------------------------
 RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
 
-# Sur CPU/Mac, fp16 peut être inutile => mets false si soucis/perf
+# Sur CPU/Mac, fp16 peut être inutile : mettre false si soucis/perf
 USE_FP16 = os.getenv("USE_FP16", "false").lower() == "true"
 
 # Garde-fous
@@ -25,7 +25,7 @@ MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "2000"))
 
 app = FastAPI(title="BGE Rerank HTTP Service")
 
-# Chargé une seule fois
+
 reranker = FlagReranker(RERANK_MODEL, use_fp16=USE_FP16)
 
 class RerankRequest(BaseModel):

@@ -1,5 +1,6 @@
 ## To do :
 # - filtre pour ne pas prendre la table des matières en chunks
+# - mettre un path pour mettre en json les chunks si nombreux avant de lancer ingestion dans milvus
 from __future__ import annotations
 
 import os
@@ -11,6 +12,10 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from pydantic import BaseModel, Field
+
+import re
+import httpx
+
 
 # -------------------------
 # Path setup
@@ -52,6 +57,11 @@ if not DOCLING_MODELS_PATH:
         "DOCLING_MODELS_PATH manquant. "
         "Ajoute-le dans .env ou exporte-le avant de lancer uvicorn."
     )
+VDB_SERVICE_URL = os.getenv("VDB_SERVICE_URL", "http://localhost:8003")
+DEFAULT_COLLECTION = os.getenv("VDB_DEFAULT_COLLECTION", "rag_minist_int_hybrid_v2")
+MAX_TEXT = 60000
+BATCH_SIZE = 256
+
 
 app = FastAPI(title="Chunking API", version="0.1.0")
 
@@ -80,6 +90,15 @@ class ChunkStatsOut(BaseModel):
     median_tokens: int
     p95_tokens: int
     histogram: Dict[str, Any]  # {"bin_edges": [...], "counts": [...]}
+
+class IngestChunksOut(BaseModel):
+    ok: bool
+    collection: str
+    mode: str
+    inserted: int
+    n_chunks: int
+    chunks: List[ChunkOut]
+
 
 
 # -------------------------
@@ -351,3 +370,125 @@ async def chunks_stats(
             os.remove(tmp_path)
         except Exception:
             pass
+
+
+# @app.post("/chunks/ingest", response_model=IngestChunksOut)
+# async def chunk_and_ingest(
+#     file: UploadFile = File(...),
+
+#     # chunking params
+#     artifacts_path: Optional[str] = Query(default=None),
+#     image_model: str = Query(default="qwen2.5vl:3b"),
+#     text_model: str = Query(default="llama3.2:3b"),
+#     pdf_strategy: str = Query(default="structure"),
+#     semantic_scope: str = Query(default="section"),
+#     semantic_embeddings_model: str = Query(default="qwen3-embedding:0.6b"),
+#     semantic_ollama_base_url: str = Query(default="http://localhost:11434"),
+#     semantic_breakpoint_threshold_type: str = Query(default="percentile"),
+#     chunk_size_tokens: int = Query(default=1000, ge=100, le=8000),
+#     min_chunk_chars: int = Query(default=200, ge=0, le=5000),
+
+#     # ingestion params
+#     collection: str = Query(default=DEFAULT_COLLECTION),
+#     mode: str = Query(default="upsert", description='insert | upsert'),
+#     batch_size: int = Query(default=256, ge=1, le=2000),
+
+#     # defaults type/source (comme ton notebook)
+#     default_source: str = Query(default="doc"),
+#     default_chunk_type: str = Query(default="doc_chunk"),
+
+#     drop_toc: bool = Query(default=True, description="Filtrer la table des matières (si tu implémentes le filtre)"),
+# ):
+#     suffix = os.path.splitext(file.filename)[1] or ""
+#     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+#         tmp_path = tmp.name
+#         content = await file.read()
+#         tmp.write(content)
+
+#     try:
+#         # 1) Extract + chunk (pareil que /chunks)
+#         res = _extract_with_docling(
+#             filepath=tmp_path,
+#             artifacts_path=artifacts_path,
+#             image_model=image_model,
+#             text_model=text_model,
+#         )
+
+#         cfg_pdf = PdfChunkingConfig(
+#             chunk_size_tokens=chunk_size_tokens,
+#             min_chunk_chars=min_chunk_chars,
+#             semantic_scope=semantic_scope,
+#             semantic_embeddings_model=semantic_embeddings_model,
+#             semantic_ollama_base_url=semantic_ollama_base_url,
+#             semantic_breakpoint_threshold_type=semantic_breakpoint_threshold_type,
+#         )
+
+#         chunks_raw = _chunk_by_extension(
+#             res,
+#             file.filename,
+#             pdf_strategy=pdf_strategy,
+#             cfg_pdf=cfg_pdf,
+#         )
+#         chunks = _to_chunk_out_list(chunks_raw)
+#         n_chunks = len(chunks)
+
+#         # (optionnel) filtre TOC — pas implémenté ici
+#         # chunks = _filter_chunks(chunks, drop_toc=drop_toc)
+
+#         # 2) Construire les items à envoyer au VDB (logique notebook)
+#         items = []
+#         for c in chunks:
+#             txt = (c.text or "")[:MAX_TEXT]  # si tu veux garder ton MAX_TEXT notebook, sinon enlève
+#             if not txt.strip():
+#                 continue
+
+#             meta = dict(c.meta or {})
+#             # notebook: meta.setdefault("type", obj.get("chunk_type", chunk_type))
+#             # ici on set default si absent
+#             chunk_type = (meta.get("type") or default_chunk_type).strip()
+#             meta.setdefault("type", chunk_type)
+
+#             items.append({
+#                 "id": c.id,  # l'id existe déjà côté chunking
+#                 "text": txt[:65535],
+#                 "source": (c.source or default_source),
+#                 "section_path": c.section_path or "",
+#                 "section_title": c.section_title or "",
+#                 "page_no": int(c.page_no) if c.page_no is not None else -1,
+#                 "chunk_type": chunk_type,   # ✅ top-level
+#                 "meta": meta,
+#             })
+
+#         # 3) Appeler le VDB /upsert
+#         payload = {
+#             "collection": collection,
+#             "items": items,
+#             "batch_size": batch_size,
+#             "mode": mode,
+#         }
+
+#         async with httpx.AsyncClient(timeout=300.0) as client:
+#             r = await client.post(f"{VDB_SERVICE_URL}/upsert", json=payload)
+#             if r.status_code >= 400:
+#                 raise HTTPException(status_code=500, detail={"vdb_error": r.text})
+#             data = r.json()
+
+#         inserted = int(data.get("count", 0))
+
+#         # 4) Retourne chunks + stats ingestion
+#         return IngestChunksOut(
+#             ok=True,
+#             collection=collection,
+#             mode=mode,
+#             inserted=inserted,
+#             n_chunks=n_chunks,
+#             chunks=chunks,
+#         )
+
+#     finally:
+#         try:
+#             os.remove(tmp_path)
+#         except Exception:
+#             pass
+
+

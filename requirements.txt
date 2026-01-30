@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+requests
+pymilvus
+ollama
+
+# chunking/docling
+python-multipart
+python-dotenv
+pillow
+docling
+docling-core
+tiktoken
+langchain
+langchain-community
+langchain-experimental
+
+# rerank
+FlagEmbedding

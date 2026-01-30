@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChunkingConfig:
     chunk_size_tokens: int = 1000
-    chunk_overlap_tokens: int = 100  # (not used strictly, kept for compatibility)
+    chunk_overlap_tokens: int = 100 
     chars_per_token: int = 4
 
     drop_bibliography: bool = True
@@ -213,7 +213,6 @@ class Chunk:
 def _make_semantic_splitter(cfg: ChunkingConfig):
     """
     Crée un SemanticChunker basé sur un embeddings provider.
-    Essaie OllamaEmbeddings (langchain-community) puis fallback HTTP /api/embeddings.
     """
     from langchain_experimental.text_splitter import SemanticChunker
 
