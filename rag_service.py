@@ -14,7 +14,7 @@ from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
 # Config
 # =========================
 MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
-COLL = os.getenv("MILVUS_COLLECTION", "rag_minist_int_hybrid")
+COLL = os.getenv("MILVUS_COLLECTION", "rag_minist_int_hybrid_v2")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")

@@ -28,20 +28,11 @@ Ce repo contient plusieurs services FastAPI + scripts CLI pour :
 ---
 
 ## Installation modèle docling
+
+il faut télécharger via docling-tools les modèles de traitement :
+
 ```bash
-DOCLING_MODELS_PATH=~/.cache/docling/models \
-python - << 'EOF'
-from docling.document_converter import DocumentConverter
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.datamodel.base_models import InputFormat
-
-opts = PdfPipelineOptions(artifacts_path="~/.cache/docling/models")
-conv = DocumentConverter(
-    format_options={InputFormat.PDF: opts}
-)
-
-print("Docling models downloaded / ready")
-EOF
+docling-tools models download
 ```
 
 ## Installation de Milvus
