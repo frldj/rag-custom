@@ -82,7 +82,7 @@ def safe_primary_id(raw: str, *, max_len: int = 512) -> str:
 @dataclass
 class MilvusHybridConfig:
     uri: str = MILVUS_URI
-    collection: str = "rag_minist_int_hybrid_v2"
+    collection: str = "rag_minist_int_hybrid"
     embed_dim: int = EMBED_DIM
 
     # lifecycle

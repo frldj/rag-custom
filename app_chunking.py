@@ -58,7 +58,7 @@ if not DOCLING_MODELS_PATH:
         "Ajoute-le dans .env ou exporte-le avant de lancer uvicorn."
     )
 VDB_SERVICE_URL = os.getenv("VDB_SERVICE_URL", "http://localhost:8003")
-DEFAULT_COLLECTION = os.getenv("VDB_DEFAULT_COLLECTION", "rag_minist_int_hybrid_v2")
+DEFAULT_COLLECTION = os.getenv("VDB_DEFAULT_COLLECTION", "rag_minist_int_hybrid")
 MAX_TEXT = 60000
 BATCH_SIZE = 256
 

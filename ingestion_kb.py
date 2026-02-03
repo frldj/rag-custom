@@ -16,7 +16,7 @@ import httpx
 # -----------------------
 DEFAULT_CHUNKING_API_URL = os.getenv("CHUNKING_API_URL", "http://localhost:8002")
 DEFAULT_VDB_SERVICE_URL = os.getenv("VDB_SERVICE_URL", "http://localhost:8003")
-DEFAULT_COLLECTION = os.getenv("VDB_COLLECTION", "rag_minist_int_hybrid_v2")
+DEFAULT_COLLECTION = os.getenv("VDB_COLLECTION", "rag_minist_int_hybrid")
 
 MAX_TEXT = 60000
 
