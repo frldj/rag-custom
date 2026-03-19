@@ -19,3 +19,28 @@ langchain-experimental
 
 # rerank
 FlagEmbedding
+
+# prompt
+pyyaml
+
+# docling
+docling-ocr-onnxtr
+
+# Installation de onnxtr (le moteur OCR)
+onnxtr
+
+# Installation de ultralytics (pour YOLO)
+ultralytics
+
+
+# Installation du moteur d'exécution ONNX (CPU ou GPU)
+onnxruntime  # ou onnxruntime-gpu si tu as une carte NVIDIA
+
+# langchain
+langchain-ollama
+langchain
+langchain-core
+
+# huggingface
+sentence-transformers
+torch

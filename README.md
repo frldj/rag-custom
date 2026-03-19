@@ -92,10 +92,11 @@ ollama pull qwen2.5vl:3b
 ```bash
 export KMP_DUPLICATE_LIB_OK=TRUE
 uvicorn rerank_service:app --host 0.0.0.0 --port 8001
-uvicorn app_chunking:app --host 0.0.0.0 --port 8002
+uvicorn app_chunks:app --host 0.0.0.0 --port 8002
 uvicorn app_vdb_milvus:app --host 0.0.0.0 --port 8003
 uvicorn rag_service:app --host 0.0.0.0 --port 8004
 ```
+
 
 ## Ingestion (PDF/Words -> chunks -> upsert)
 
