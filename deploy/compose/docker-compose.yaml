@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  rerank-server:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    ports: ["8001:8001"]
+    env_file: ../../.env
+    environment:
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - HF_HOME=/app/.cache             # Définit le chemin du cache dans le conteneur
+    volumes:
+      - ~/.cache/huggingface:/app/.cache # Relie le cache de ton Mac au conteneur
+    command: uvicorn rerank_server.rerank_service:app --host 0.0.0.0 --port 8001
+
+  ingestor-server:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    ports: ["8002:8002"]
+    env_file: ../../.env
+    environment:
+      - VDB_SERVICE_URL=http://vdb-server:8003
+      - HF_HOME=/app/.cache             
+    volumes:
+      - ~/.cache/huggingface:/app/.cache #
+    command: uvicorn ingestor_server.ingestor_service.app_chunks:app --host 0.0.0.0 --port 8002
+
+  vdb-server:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    ports: ["8003:8003"]
+    env_file: ../../.env
+    environment:
+      - MILVUS_URI=http://milvus-standalone:19530
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - HF_HOME=/app/.cache            
+    volumes:
+      - ~/.cache/huggingface:/app/.cache 
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - milvus-net
+    command: uvicorn ingestor_server.vdb_service.app_vdb_milvus:app --host 0.0.0.0 --port 8003
+
+  rag-server:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    ports: ["8004:8004"]
+    env_file: ../../.env
+    environment:
+      - MILVUS_URI=http://milvus-standalone:19530
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - RERANK_URL=http://rerank-server:8001/rerank
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - HF_HOME=/app/.cache           
+    volumes:
+      - ~/.cache/huggingface:/app/.cache 
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - milvus-net
+    depends_on:
+      - rerank-server
+    command: uvicorn rag_server.rag_service:app --host 0.0.0.0 --port 8004
+
+networks:
+  milvus-net:
+    external: true
+    name: milvus
