@@ -23,9 +23,67 @@ Ce repo contient plusieurs services FastAPI + scripts CLI pour :
 - Ollama installé et lancé
 - Milvus lancé (standalone recommandé)
 - Modèle Docling disponible 
+- Compte huggingface accessible
+- Docker disponible
 - (optionnel) LibreOffice si ingestion de `.docx` via conversion PDF (commande `soffice`)
 
 ---
+## Docker
+
+Le projet peut être lancé via Docker Compose pour démarrer les différents services backend du pipeline RAG.
+
+### Services exposés
+
+- **Ollama** : `http://localhost:11434`
+- **Milvus** : `http://localhost:19530`
+- **Rerank service** (`rerank_service.py`) : `http://localhost:8001`
+- **Chunking API** (`app_vchunking.py`) : `http://localhost:8002`
+- **VDB service** (`app_vdb_milvus.py`) : `http://localhost:8003`
+- **RAG service** (`rag_service.py`) : `http://localhost:8004`
+
+---
+
+### Structure Docker
+
+Les fichiers Docker sont regroupés dans le dossier `deploy/compose/`.
+
+#### `Dockerfile`
+
+Le conteneur est basé sur `python:3.10-slim` et :
+
+- définit `/app` comme répertoire de travail
+- installe les dépendances système nécessaires
+- copie `requirements.txt` et le fichier `.env`
+- installe les dépendances Python
+- copie le code source depuis `src/`
+- configure `PYTHONPATH=/app/src`
+- configure le cache Hugging Face dans `/app/.cache`
+
+#### `docker-compose.yml`
+
+Le `docker-compose.yml` démarre 4 services applicatifs :
+
+- `rerank-server`
+- `ingestor-server`
+- `vdb-server`
+- `rag-server`
+
+Il s’appuie également sur des services externes/accessibles :
+
+- **Ollama** sur l’hôte : `host.docker.internal:11434`
+- **Milvus** sur le réseau Docker `milvus-net`
+
+---
+### Structure API
+
+### Pré-requis
+
+Avant de lancer le projet, vérifier que :
+
+1. **Ollama** est démarré sur la machine hôte
+2. **Milvus** est déjà lancé et accessible sur le réseau Docker `milvus-net`
+3. le fichier **`.env`** existe à la racine du projet
+4. le réseau Docker **`milvus`** existe
 
 ## Installation modèle docling
 
@@ -100,17 +158,12 @@ uvicorn rag_service:app --host 0.0.0.0 --port 8004
 
 ## Ingestion (PDF/Words -> chunks -> upsert)
 
-Script CLI : ingestion_kb.py
+Script CLI : src/ingestor_server/ingestor.py
 
 Exemple :
 
 ```bash
-python ingestion_kb.py ./docs \
-  --chunking-url http://localhost:8002 \
-  --vdb-url http://localhost:8003 \
-  --collection rag_minist_int_hybrid_v2 \
-  --mode insert \
-  --pdf-strategy structure \
-  --chunk-size-tokens 1000 \
-  --min-chunk-chars 200
+python ingestor.py ./docs \
+  --strategy hybrid \
+  --max-chars 1200 \
 ```
