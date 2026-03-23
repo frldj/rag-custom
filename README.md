@@ -73,6 +73,13 @@ Il s’appuie également sur des services externes/accessibles :
 - **Ollama** sur l’hôte : `host.docker.internal:11434`
 - **Milvus** sur le réseau Docker `milvus-net`
 
+#### Lancement
+
+Allez dans "cd deploy/compose" et lancez :
+
+```bash
+docker compose up --build
+```
 ---
 ### Structure API
 
