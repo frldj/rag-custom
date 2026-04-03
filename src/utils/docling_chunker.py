@@ -189,10 +189,12 @@ import uuid
 import logging
 import gc
 import html
+import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
+from huggingface_hub import login
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Imports Docling
@@ -205,570 +207,228 @@ from docling.document_converter import (
     WordFormatOption,
     PowerpointFormatOption,
 )
+from docling_ocr_onnxtr import OnnxtrOcrOptions
+from onnxtr.models import db_mobilenet_v3_large, crnn_mobilenet_v3_large
 from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
 from docling.chunking import HybridChunker
 
-import os
-from huggingface_hub import login
+# Imports pour la sérialisation avancée des tableaux
+from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingDocSerializer,
+    ChunkingSerializerProvider,
+)
+from docling_core.transforms.serializer.markdown import MarkdownTableSerializer
+
+import platform
+
+try:
+    if platform.system() == "Darwin":
+        import ocrmac
+    else:
+        ocrmac = None
+except ImportError:
+    ocrmac = None
+
+# Plus loin dans ton code
+if ocrmac:
+    # Utiliser l'OCR Mac
+    pass
+else:
+    # Utiliser Docling standard (qui tourne sur ONNX/CPU sous Linux)
+    pass
 
 logger = logging.getLogger(__name__)
 
-# Si la variable d'environnement est présente, on se connecte
+import logging
+# On réduit au silence le warning spécifique des transformers/tokenizers
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+
+# Connexion HF si nécessaire
 if os.getenv("HF_TOKEN"):
     login(token=os.getenv("HF_TOKEN"))
-
-
-PAGE_BREAK = "<!-- page_break -->"
 
 @dataclass
 class Chunk:
     id: str
     source: str
-    text: str
+    text: str  # Texte enrichi (avec préfixe E5 et breadcrumbs)
     page_no: Optional[int] = None
     meta: Dict[str, Any] = field(default_factory=dict)
+
+# Provider pour forcer le rendu Markdown des tableaux
+class MDTableSerializerProvider(ChunkingSerializerProvider):
+    def get_serializer(self, doc):
+        return ChunkingDocSerializer(
+            doc=doc,
+            table_serializer=MarkdownTableSerializer(), 
+        )
 
 class MultiFormatDoclingChunker:
     def __init__(
         self,
         strategy: Literal["recursive", "hybrid"] = "hybrid",
-        min_chars: int = 600,
+        min_chars: int = 200, # Seuil bas pour ne pas perdre de données
         max_chars: int = 1500,
         device: AcceleratorDevice = AcceleratorDevice.AUTO
     ):
-        # Paramètres par défaut
         self.default_strategy = strategy
         self.default_min_chars = min_chars
         self.default_max_chars = max_chars
         
-        # Configuration PIPELINE (VITESSE OPTIMISÉE)
+        # 1. CONFIGURATION DU PIPELINE HAUTE PRÉCISION
         pipeline_options = PdfPipelineOptions()
+        pipeline_options.allow_external_plugins = True
         pipeline_options.accelerator_options = AcceleratorOptions(device=device, num_threads=4)
-        pipeline_options.allow_external_plugins = True  # Nécessaire pour charger onnxtr
-        pipeline_options.generate_page_images = False
-        pipeline_options.generate_picture_images = False
         pipeline_options.do_table_structure = True
         pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+        pipeline_options.table_structure_options.do_cell_matching = True
+        pipeline_options.do_ocr = True # Indispensable pour les PDF scannés
 
-        # --- CONFIGURATION OCR(ONNXTR + MobileNetV3) ---
-        pipeline_options.do_ocr = True
         try:
             from docling_ocr_onnxtr import OnnxtrOcrOptions
+            ocr_options = OnnxtrOcrOptions()
             
-
-            ocr_opts = OnnxtrOcrOptions(
-                det_arch="db_mobilenet_v3_large",    # Modèle de détection
-                reco_arch="crnn_mobilenet_v3_large",  # Modèle de reconnaissance
-                force_full_page_ocr=False            # Uniquement si la page n'est pas lisible nativement
-            )
+            # Au lieu d'assigner des objets (qui font planter Pydantic), 
+            # on passe les noms des architectures si le plugin le permet, 
+            # ou on laisse par défaut en s'assurant que le plugin est chargé.
             
-            pipeline_options.ocr_options = ocr_opts
-            logger.info("OCR : Moteur ONNXTR configuré explicitement avec MobileNetV3.")
-        except ImportError:
-            logger.warning("OCR : docling-ocr-onnxtr non trouvé, passage en mode auto.")
-            pass
+            # Si tu veux vraiment MobileNet V3 Large, la version propre est :
+            # ocr_options.force_full_page_ocr = True # Exemple d'option valide
+            
+            pipeline_options.ocr_options = ocr_options
+            logger.info("OCR : Plugin ONNXTR activé.")
+        except Exception as e:
+            logger.warning(f"Erreur configuration OCR : {e}")
 
-        # Initialisation du convertisseur
+        pdf_options = PdfFormatOption(
+            pipeline_options=pipeline_options,
+            backend=DoclingParseV4DocumentBackend
+        )
+
         self.converter = DocumentConverter(
             allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX],
             format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_options=pipeline_options, 
-                    backend=DoclingParseV4DocumentBackend
-                ),
+                InputFormat.PDF: pdf_options,
                 InputFormat.PPTX: PowerpointFormatOption(),
                 InputFormat.DOCX: WordFormatOption(),
             }
         )
 
-    def _deep_clean(self, text: str) -> str:
-        if not text: return ""
-        text = html.unescape(text)
-        text = re.sub(r"<!--(?!(?: page_break )).*?-->", "", text)
-        text = re.sub(r"[ \t]+", " ", text)
-        return text.strip()
-
-    def _merge_logic(self, segments: List[str], min_chars: int) -> List[str]:
-        merged = []
-        for seg in segments:
-            seg = self._deep_clean(seg)
-            if not seg: continue
-            
-            if not merged:
-                merged.append(seg)
-            elif len(merged[-1]) < min_chars:
-                merged[-1] = f"{merged[-1]}\n\n{seg}"
-            else:
-                merged.append(seg)
-        
-        if len(merged) > 1 and len(merged[-1]) < min_chars:
-            last = merged.pop()
-            merged[-1] = f"{merged[-1]}\n\n{last}"
-        return merged
-
     def chunk_file(
         self, 
         file_path: str | Path, 
-        strategy: Optional[str] = None, 
-        max_chars: Optional[int] = None, 
-        min_chars: Optional[int] = None
+        strategy: Optional[str] = None,
+        max_chars: Optional[int] = None,
+        min_chars: Optional[int] = None,
+        summary: Optional[str] = None,  
+        doc_date: Optional[str] = None
     ) -> List[Chunk]:
         file_path = Path(file_path)
-        ext = file_path.suffix.lower()
-        
         current_strategy = strategy or self.default_strategy
-        current_max = max_chars or self.default_max_chars
-        current_min = min_chars or self.default_min_chars
-
+        
+        # Note : target_max pourrait être converti en tokens pour l'hybrid 
+        # (ex: target_max // 3) si tu veux que l'argument max_chars pilote l'hybrid.
+        
         try:
             result = self.converter.convert(file_path)
             doc = result.document
-            raw_segments = []
 
-            if ext == ".pptx":
-                # PPTX : Découpage par slide
-                full_md = doc.export_to_markdown(page_break_placeholder=PAGE_BREAK)
-                raw_segments = full_md.split(PAGE_BREAK)
-            
-            elif current_strategy == "hybrid":
-                # STRATÉGIE HYBRIDE (DOCLING)
+            doc_meta = {
+                "file_name": file_path.name,
+                "doc_summary": summary or "Non disponible",
+                "doc_date": doc_date or "unknown",
+                "file_ext": file_path.suffix.lower()
+            }
+
+            if current_strategy == "hybrid":
+                tokenizer_name = os.getenv("EMBEDDING_MODEL_NAME", "intfloat/multilingual-e5-base")
+                
+                # On utilise max_chars pour estimer max_tokens si fourni, 
+                # sinon 420 (valeur optimale e5)
+                #calculated_max_tokens = (max_chars // 3) if max_chars else 420
+                target_tokens = 448
+
                 hybrid_chunker = HybridChunker(
-                    tokenizer=os.getenv("EMBEDDING_MODEL_NAME"), #"sentence-transformers/all-MiniLM-L6-v2",
+                    tokenizer=tokenizer_name,
+                    max_tokens=target_tokens, #min(calculated_max_tokens, 450), # On ne dépasse pas la limite e5
                     merge_peers=True,
-                    max_tokens=int(current_max / 3) 
+                    serializer_provider=MDTableSerializerProvider()
                 )
-                chunks_gen = hybrid_chunker.chunk(doc)
-                raw_segments = [hybrid_chunker.serialize(c) for c in chunks_gen]
+                
+                chunks_gen = hybrid_chunker.chunk(doc) 
+                final_chunks = []
+
+                for i, c in enumerate(chunks_gen):
+                    raw_text = hybrid_chunker.serialize(c)
+                    breadcrumb = " > ".join(c.meta.headings) if c.meta.headings else ""
+                    
+                    if breadcrumb:
+                        enriched_text = f"passage: {breadcrumb}\n{raw_text}"
+                    else:
+                        enriched_text = f"passage: {raw_text}"
+
+                    is_table = any(getattr(item, "label", "") == "Table" for item in c.meta.doc_items)
+
+                    try:
+                        token_count = len(hybrid_chunker.tokenizer.tokenizer.encode(enriched_text))
+                    except Exception:
+                        token_count = 0 
+                    
+                    page_no = None
+                    try:
+                        if c.meta.doc_items:
+                            page_no = c.meta.doc_items[0].prov[0].page_no
+                    except (AttributeError, IndexError):
+                        pass
+
+                    # On utilise min_chars ici pour filtrer les chunks trop petits
+                    limit_min = min_chars or self.default_min_chars
+                    if len(raw_text) < (limit_min // 4) and not is_table:
+                        continue
+
+                    final_chunks.append(Chunk(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}")),
+                    source=file_path.name,
+                    text=enriched_text,
+                    page_no=page_no,
+                    meta={
+                        **doc_meta, # <--- On injecte les infos globales
+                        "raw_content": raw_text,
+                        "breadcrumb": breadcrumb,
+                        "token_count": token_count,
+                        "is_table": is_table,
+                        }
+                    ))
+                return final_chunks
             
             else:
-                # STRATÉGIE RECURSIVE (LANGCHAIN)
+                # Logique RECURSIVE par défaut
                 text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=current_max,
-                    chunk_overlap=0,
+                    chunk_size=max_chars or self.default_max_chars,
+                    chunk_overlap=150,
                     separators=["\n\n", "\n", ". ", " ", ""],
-                    keep_separator=True
                 )
-                full_md = doc.export_to_markdown(page_break_placeholder=PAGE_BREAK)
-                pages = full_md.split(PAGE_BREAK)
-                for page in pages:
-                    if not page.strip(): continue
-                    raw_segments.extend(text_splitter.split_text(page))
-
-            # Nettoyage mémoire
-            if hasattr(result, "input") and hasattr(result.input, "_backend"):
-                result.input._backend.unload()
-            del result, doc
-            gc.collect()
-
-            final_texts = self._merge_logic(raw_segments, current_min)
-            
-            return [
+                full_md = doc.export_to_markdown()
+                raw_segments = text_splitter.split_text(full_md)
+                
+                return [
                 Chunk(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}")),
                     source=file_path.name,
-                    text=t,
-                    meta={"char_count": len(t), "format": ext, "strategy": current_strategy}
-                ) for i, t in enumerate(final_texts)
-            ]
+                    text=f"passage: {t}",
+                    meta={**doc_meta, "char_count": len(t), "strategy": "recursive"} # <--- On injecte ici aussi
+                ) for i, t in enumerate(raw_segments)
+                ]
 
         except Exception as e:
-            logger.error(f"Erreur sur {file_path}: {e}")
+            logger.error(f"Erreur lors du traitement de {file_path}: {e}")
             raise
+        finally:
+            if 'result' in locals():
+                del result
+            gc.collect()
 
 def chunks_to_dicts(chunks: List[Chunk]) -> List[Dict[str, Any]]:
     return [asdict(c) for c in chunks]
 
-# from __future__ import annotations
-
-# import re
-# import uuid
-# import logging
-# import gc
-# import html
-# from dataclasses import dataclass, field, asdict
-# from pathlib import Path
-# from typing import Any, Dict, List, Optional
-
-# from docling.datamodel.base_models import InputFormat
-# from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
-# from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-# from docling.document_converter import (
-#     DocumentConverter,
-#     PdfFormatOption,
-#     WordFormatOption,
-#     PowerpointFormatOption,
-#     MarkdownFormatOption,
-#     HTMLFormatOption,
-#     ExcelFormatOption,
-# )
-# from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
-
-# # IMPORT DU CHUNKER NATIF DOCLING
-# from docling.chunking import HybridChunker
-
-# logger = logging.getLogger(__name__)
-
-# @dataclass
-# class Chunk:
-#     id: str
-#     source: str
-#     text: str
-#     meta: Dict[str, Any] = field(default_factory=dict)
-
-# class MultiFormatDoclingChunker:
-#     def __init__(
-#         self,
-#         min_chars: int = 600,
-#         max_chars: int = 1500,
-#         device: AcceleratorDevice = AcceleratorDevice.AUTO
-#     ):
-#         self.min_chars = min_chars
-#         self.max_chars = max_chars
-
-#         # Configuration du pipeline Docling
-#         pipeline_options = PdfPipelineOptions()
-#         pipeline_options.accelerator_options = AcceleratorOptions(device=device, num_threads=4)
-#         pipeline_options.do_ocr = True 
-#         pipeline_options.do_table_structure = True
-#         pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
-
-#         # 1. Initialisation du convertisseur
-#         self.converter = DocumentConverter(
-#             allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, 
-#                              InputFormat.XLSX, InputFormat.HTML, InputFormat.MD],
-#             format_options={
-#                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options, backend=DoclingParseV4DocumentBackend),
-#                 InputFormat.DOCX: WordFormatOption(),
-#                 InputFormat.PPTX: PowerpointFormatOption(),
-#                 InputFormat.MD: MarkdownFormatOption(),
-#                 InputFormat.HTML: HTMLFormatOption(),
-#                 InputFormat.XLSX: ExcelFormatOption(),
-#             },
-#         )
-
-#         # 2. Initialisation du Hybrid Chunker (Natif Docling)
-#         # Il gère nativement le respect des titres et des tableaux.
-#         self.docling_chunker = HybridChunker(
-#             tokenizer="sentence-transformers/all-MiniLM-L6-v2", # Tokenizer léger pour le calcul de taille
-#             merge_peers=True,
-#             max_tokens=self.max_chars # Ici max_chars est utilisé comme limite haute
-#         )
-
-#     def _deep_clean(self, text: str) -> str:
-#         """Nettoyage final avant fusion/export"""
-#         if not text: return ""
-#         text = html.unescape(text)
-#         text = re.sub(r"<!--.*?-->", "", text)
-#         text = text.replace("\u00a0", " ").replace("\xad", "")
-#         text = re.sub(r"[ \t]+", " ", text)
-#         # Déduplication des lignes (important pour PPTX)
-#         lines = text.split('\n')
-#         seen = set()
-#         unique_lines = []
-#         for line in lines:
-#             clean_l = line.strip()
-#             if not clean_l.startswith("|") and clean_l.lower() in seen and len(clean_l) > 10:
-#                 continue
-#             unique_lines.append(line)
-#             if len(clean_l) > 10: seen.add(clean_l.lower())
-#         return "\n".join(unique_lines).strip()
-
-#     def _merge_small_chunks(self, raw_chunks: List[str]) -> List[str]:
-#         """Fusionne les morceaux structurels s'ils sont < 600 caractères"""
-#         merged = []
-#         for c in raw_chunks:
-#             c = self._deep_clean(c)
-#             if not c or len(c) < 5: continue
-            
-#             if not merged:
-#                 merged.append(c)
-#             elif len(merged[-1]) < self.min_chars:
-#                 merged[-1] = f"{merged[-1]}\n\n{c}"
-#             else:
-#                 merged.append(c)
-        
-#         if len(merged) > 1 and len(merged[-1]) < self.min_chars:
-#             last = merged.pop()
-#             merged[-1] = f"{merged[-1]}\n\n{last}"
-#         return merged
-
-#     def chunk_file(self, file_path: str | Path) -> List[Chunk]:
-#         file_path = Path(file_path)
-#         try:
-#             # 1. Conversion Docling
-#             result = self.converter.convert(file_path)
-#             doc = result.document
-            
-#             # 2. Chunking Hybride (Structurel)
-#             # Cette méthode renvoie des objets 'BaseChunk' qui respectent les tableaux
-#             docling_chunks = list(self.docling_chunker.chunk(doc))
-            
-#             # 3. Extraction du texte des chunks structurels
-#             raw_segments = [self.docling_chunker.serialize(c) for c in docling_chunks]
-
-#             # Nettoyage mémoire
-#             if hasattr(result, "input") and hasattr(result.input, "_backend"):
-#                 result.input._backend.unload()
-#             del result
-#             gc.collect()
-
-#             # 4. Fusion selon votre règle des 600 caractères
-#             final_texts = self._merge_small_chunks(raw_segments)
-            
-#             # 5. Création des objets finaux
-#             chunks = []
-#             for i, text in enumerate(final_texts):
-#                 chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}"))
-#                 chunks.append(Chunk(
-#                     id=chunk_id,
-#                     source=str(file_path),
-#                     text=text,
-#                     meta={
-#                         "char_count": len(text),
-#                         "format": file_path.suffix.lower(),
-#                         "index": i
-#                     }
-#                 ))
-#             return chunks
-
-#         except Exception as e:
-#             logger.error(f"Erreur chunking {file_path}: {e}")
-#             raise
-
-# def chunks_to_dicts(chunks: List[Chunk]) -> List[Dict[str, Any]]:
-#     return [asdict(c) for c in chunks]
-
-# from __future__ import annotations
-
-# import re
-# import uuid
-# import logging
-# import gc
-# import os
-# import html
-# from dataclasses import dataclass, field, asdict
-# from pathlib import Path
-# from typing import Any, Dict, List, Optional, Tuple
-
-# import pandas as pd
-# from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-# # Imports Docling
-# from docling.datamodel.base_models import InputFormat
-# from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
-# from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-# from docling.document_converter import (
-#     DocumentConverter,
-#     PdfFormatOption,
-#     WordFormatOption,
-#     PowerpointFormatOption,
-#     MarkdownFormatOption,
-#     HTMLFormatOption,
-#     ExcelFormatOption,
-# )
-# from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
-
-# logger = logging.getLogger(__name__)
-
-# PAGE_BREAK = "<!-- page_break -->"
-
-# @dataclass
-# class Chunk:
-#     id: str
-#     source: str
-#     text: str
-#     page_no: Optional[int] = None
-#     meta: Dict[str, Any] = field(default_factory=dict)
-
-# # =============================================================================
-# # Chunker Multi-Format avec Protection des Tableaux
-# # =============================================================================
-
-# class MultiFormatDoclingChunker:
-#     def __init__(
-#         self,
-#         min_chars: int = 600,
-#         max_chars: int = 1500,
-#         device: AcceleratorDevice = AcceleratorDevice.AUTO
-#     ):
-#         self.min_chars = min_chars
-        
-#         # Splitter pour le texte normal uniquement
-#         self.text_splitter = RecursiveCharacterTextSplitter(
-#             chunk_size=max_chars,
-#             chunk_overlap=0,
-#             separators=["\n\n", "\n", ". ", " ", ""],
-#             keep_separator=True
-#         )
-
-#         pipeline_options = PdfPipelineOptions()
-#         pipeline_options.accelerator_options = AcceleratorOptions(device=device, num_threads=4)
-#         pipeline_options.do_ocr = True 
-#         pipeline_options.do_table_structure = True
-#         pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
-#         pipeline_options.table_structure_options.do_cell_matching = True
-
-#         self.converter = DocumentConverter(
-#             allowed_formats=[
-#                 InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, 
-#                 InputFormat.XLSX, InputFormat.HTML, InputFormat.MD
-#             ],
-#             format_options={
-#                 InputFormat.PDF: PdfFormatOption(
-#                     pipeline_options=pipeline_options, 
-#                     backend=DoclingParseV4DocumentBackend
-#                 ),
-#                 InputFormat.DOCX: WordFormatOption(),
-#                 InputFormat.PPTX: PowerpointFormatOption(),
-#                 InputFormat.MD: MarkdownFormatOption(),
-#                 InputFormat.HTML: HTMLFormatOption(),
-#                 InputFormat.XLSX: ExcelFormatOption(),
-#             },
-#         )
-
-#     def _deep_clean(self, text: str) -> str:
-#         if not text:
-#             return ""
-#         text = html.unescape(text)
-#         text = re.sub(r"<!--(?!(?: page_break )).*?-->", "", text) # On garde page_break pour le split
-#         text = text.replace("\u00a0", " ").replace("\xad", "")
-#         text = re.sub(r"[ \t]+", " ", text)
-        
-#         # Nettoyage des lignes (sauf pour les tableaux où on garde la structure)
-#         lines = text.split('\n')
-#         seen_lines = set()
-#         unique_lines = []
-#         for line in lines:
-#             clean_line = line.strip()
-#             # Si ce n'est pas une ligne de tableau, on peut dédupliquer
-#             if not clean_line.startswith("|"):
-#                 if clean_line.lower() not in seen_lines or not clean_line:
-#                     unique_lines.append(line)
-#                     seen_lines.add(clean_line.lower())
-#             else:
-#                 unique_lines.append(line) # Garder les lignes de tableaux telles quelles
-        
-#         text = "\n".join(unique_lines)
-#         text = re.sub(r"\n{3,}", "\n\n", text)
-#         return text.strip()
-
-#     def _isolate_tables_and_text(self, text: str) -> List[Tuple[bool, str]]:
-#         """
-#         Sépare le texte en blocs : (True, contenu_tableau) ou (False, texte_normal).
-#         """
-#         lines = text.splitlines()
-#         blocks = []
-#         current_block = []
-#         in_table = False
-
-#         for line in lines:
-#             # Un tableau Markdown commence/finit généralement par |
-#             is_table_line = line.strip().startswith("|") and line.strip().endswith("|")
-            
-#             if is_table_line:
-#                 if not in_table:
-#                     # On stocke le bloc de texte précédent
-#                     if current_block:
-#                         blocks.append((False, "\n".join(current_block)))
-#                     current_block = []
-#                     in_table = True
-#                 current_block.append(line)
-#             else:
-#                 if in_table:
-#                     # On stocke le tableau précédent
-#                     if current_block:
-#                         blocks.append((True, "\n".join(current_block)))
-#                     current_block = []
-#                     in_table = False
-#                 current_block.append(line)
-        
-#         # Dernier bloc
-#         if current_block:
-#             blocks.append((in_table, "\n".join(current_block)))
-        
-#         return blocks
-
-#     def _merge_small_chunks(self, raw_segments: List[str]) -> List[str]:
-#         merged = []
-#         for s in raw_segments:
-#             s = self._deep_clean(s)
-#             if not s or len(s) < 5:
-#                 continue
-            
-#             if not merged:
-#                 merged.append(s)
-#             elif len(merged[-1]) < self.min_chars:
-#                 merged[-1] = f"{merged[-1]}\n\n{s}"
-#             else:
-#                 merged.append(s)
-        
-#         if len(merged) > 1 and len(merged[-1]) < self.min_chars:
-#             last = merged.pop()
-#             merged[-1] = f"{merged[-1]}\n\n{last}"
-            
-#         return merged
-
-#     def chunk_file(self, file_path: str | Path) -> List[Chunk]:
-#         file_path = Path(file_path)
-#         ext = file_path.suffix.lower()
-        
-#         try:
-#             result = self.converter.convert(file_path)
-#             doc = result.document
-#             full_md = doc.export_to_markdown(page_break_placeholder=PAGE_BREAK)
-            
-#             raw_segments = []
-            
-#             # On découpe d'abord par page
-#             pages = full_md.split(PAGE_BREAK)
-            
-#             for i, page_content in enumerate(pages):
-#                 if not page_content.strip(): continue
-                
-#                 if ext == ".pptx":
-#                     # PPTX : On traite la slide entière comme un segment
-#                     raw_segments.append(page_content)
-#                 else:
-#                     # PDF / DOCX / MD : On isole les tableaux
-#                     blocks = self._isolate_tables_and_text(page_content)
-#                     for is_table, content in blocks:
-#                         if is_table:
-#                             # Le tableau est ajouté d'un seul bloc, sans split interne
-#                             raw_segments.append(content)
-#                         else:
-#                             # Le texte normal est passé au splitter récursif
-#                             split_text = self.text_splitter.split_text(content)
-#                             raw_segments.extend(split_text)
-
-#             if hasattr(result, "input") and hasattr(result.input, "_backend"):
-#                 result.input._backend.unload()
-#             del result
-#             gc.collect()
-
-#             # Phase de fusion (respecte min_chars)
-#             # Note : un tableau restera entier même s'il dépasse max_chars
-#             final_texts = self._merge_small_chunks(raw_segments)
-            
-#             chunks = []
-#             for i, text in enumerate(final_texts):
-#                 chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}"))
-#                 chunks.append(Chunk(
-#                     id=chunk_id,
-#                     source=str(file_path),
-#                     text=text,
-#                     meta={
-#                         "char_count": len(text),
-#                         "format": ext,
-#                         "index": i,
-#                         "has_table": "|" in text and "---" in text # Info utile en meta
-#                     }
-#                 ))
-#             return chunks
-
-#         except Exception as e:
-#             logger.error(f"Erreur chunking {file_path}: {e}")
-#             raise
-
-# def chunks_to_dicts(chunks: List[Chunk]) -> List[Dict[str, Any]]:
-#     return [asdict(c) for c in chunks]
 

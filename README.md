@@ -6,14 +6,29 @@ Ce repo contient plusieurs services FastAPI + scripts CLI pour :
 3) répondre via un service RAG (Milvus hybrid + rerank BGE + génération LLM),
 4) exposer un service de rerank BGE via HTTP.
 
-## Architecture (ports par défaut)
+Ce repo contient également plusieurs liaison docker
+1) exposer un service d'embedding via TEI.
+2) exposer un service langfuse en local
+3) lancement de milvus en local.
 
+## Architecture 
+
+Ports : 
 - **Ollama** : `http://localhost:11434`
 - **Milvus** : `http://localhost:19530`
-- **Rerank service** (`rerank_service.py`) : `http://localhost:8001`
-- **Chunking API** (`app_vchunking.py`) : `http://localhost:8002`
-- **VDB service** (`app_vdb_milvus.py`) : `http://localhost:8003`
-- **RAG service** (`rag_service.py`) : `http://localhost:8004`
+- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8001`
+- **Chunking API** (`src/ingestor_server/ingestor_service/app_chunks.py`) : `http://localhost:8002`
+- **VDB service** (`src/ingestor_server/vdb_service/app_vdb_milvus.py`) : `http://localhost:8003`
+- **RAG service** (`src/rag_server/rag_service_langfuse.py`) : `http://localhost:8004`
+
+Dockerfile : 
+- **Milvus**
+- **Embedding TEI** 
+- **Langfuse** 
+
+Module :
+- **src/evaluation** : évaluation offline du rag avant déploiement
+- **src/finetuning** : finetuning custom du modèle d'embedding
 
 ---
 
@@ -25,6 +40,8 @@ Ce repo contient plusieurs services FastAPI + scripts CLI pour :
 - Modèle Docling disponible 
 - Compte huggingface accessible
 - Docker disponible
+- Langfuse self-hosted
+- 
 - (optionnel) LibreOffice si ingestion de `.docx` via conversion PDF (commande `soffice`)
 
 ---
@@ -36,10 +53,10 @@ Le projet peut être lancé via Docker Compose pour démarrer les différents se
 
 - **Ollama** : `http://localhost:11434`
 - **Milvus** : `http://localhost:19530`
-- **Rerank service** (`rerank_service.py`) : `http://localhost:8001`
-- **Chunking API** (`app_vchunking.py`) : `http://localhost:8002`
-- **VDB service** (`app_vdb_milvus.py`) : `http://localhost:8003`
-- **RAG service** (`rag_service.py`) : `http://localhost:8004`
+- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8001`
+- **Chunking API** (`src/ingestor_server/ingestor_service/app_chunks.py.py`) : `http://localhost:8002`
+- **VDB service** (`src/ingestor_server/vdb_service/app_vdb_milvus.py`) : `http://localhost:8003`
+- **RAG service** (`src/rag_server/rag_service_langfuse.py`) : `http://localhost:8004`
 
 ---
 
@@ -72,6 +89,7 @@ Il s’appuie également sur des services externes/accessibles :
 
 - **Ollama** sur l’hôte : `host.docker.internal:11434`
 - **Milvus** sur le réseau Docker `milvus-net`
+- **Embedding TEI**
 
 #### Lancement
 
@@ -81,7 +99,7 @@ Allez dans "cd deploy/compose" et lancez :
 docker compose up --build
 ```
 ---
-### Structure API
+### Structure API/Microservices
 
 ### Pré-requis
 
@@ -91,6 +109,38 @@ Avant de lancer le projet, vérifier que :
 2. **Milvus** est déjà lancé et accessible sur le réseau Docker `milvus-net`
 3. le fichier **`.env`** existe à la racine du projet
 4. le réseau Docker **`milvus`** existe
+5. Langfuse est démarré en self hosted
+6. L'embedding TEI est lancé
+
+## Installation de langfuse
+
+  ```bash
+  # Get a copy of the latest Langfuse repository
+  git clone https://github.com/langfuse/langfuse.git
+  cd langfuse
+
+  # Run the langfuse docker compose
+  docker compose up
+  ```
+
+
+## Installation embedding TEI
+
+```bash
+# Crée un dossier pour le modèle (par exemple dans ton home)
+mkdir -p ~/hf_models
+cd ~/hf_models
+
+# Clone le modèle (ton Mac utilisera ton authentification système)
+git clone https://huggingface.co/intfloat/multilingual-e5-base
+```
+
+Allez dans deploy/compose et lancez : 
+
+```bash
+docker compose -f docker-compose-embedding.yaml up --build 
+```
+
 
 ## Installation modèle docling
 
@@ -101,6 +151,8 @@ docling-tools models download
 ```
 
 ## Installation de Milvus
+
+Allez à la racine du projet "ministere_interieur" et lancez :
 ```bash
 wget https://github.com/milvus-io/milvus/releases/download/v2.6.9/milvus-standalone-docker-compose.yml -O docker-compose.yml
 
@@ -113,17 +165,31 @@ Creating milvus-standalone ... done
 
 ## Installation (Python)
 
-Créer un venv et installer les dépendances :
+Créer un venv : installer les dépendances :
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # mac/linux
 # .venv\Scripts\activate   # windows
+```
 
+installer les dépendances :
+```bash
 pip install -U pip
 pip install -r requirements.txt
-
 ```
+
+ou installer les dépendances via poetry :
+```bash
+poetry install
+```
+
+Si installation via poetry, il faut lancer tous les microservices par **poetry run** :
+exemple :
+```bash
+poetry run python ingestor.py
+```
+
 
 ## LibreOffice
 Si Mac:
@@ -174,3 +240,12 @@ python ingestor.py ./docs \
   --strategy hybrid \
   --max-chars 1200 \
 ```
+
+ou 
+
+```bash
+python ingestor.py ./pdfs --strategy recursive --batch-size 32
+```
+
+
+

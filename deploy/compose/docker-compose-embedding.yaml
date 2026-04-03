@@ -1,0 +1,14 @@
+services:
+  embedding-ms:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
+    platform: linux/amd64
+    container_name: embedding-ms
+    ports:
+      - "8083:80"
+    volumes:
+      # On monte le dossier téléchargé sur le Mac vers /data dans le conteneur
+      - ~/hf_models/multilingual-e5-base:/data
+    command: >
+      --model-id /data
+      --auto-truncate
+      --pooling mean

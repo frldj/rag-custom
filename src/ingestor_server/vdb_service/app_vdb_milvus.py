@@ -81,11 +81,12 @@ def emb_text(text: str) -> List[float]:
     return custom_embedder(text)
 
 
-def get_embed_dim() -> int:
-    return len(emb_text("ping"))
+# def get_embed_dim() -> int:
+#     return len(emb_text("ping"))
 
 
-EMBED_DIM = get_embed_dim()
+#EMBED_DIM = get_embed_dim()
+EMBED_DIM = int(os.getenv("EMBEDDING_DIMENSION")) 
 logger.info(f"Modèle d'embedding chargé : {HF_MODEL_NAME} | Dimension : {EMBED_DIM}")
 
 # =========================
@@ -117,18 +118,19 @@ class MilvusHybridConfig:
 
     # lifecycle
     drop_if_exists: bool = False
-    consistency_level: str = "Strong"
+    consistency_level: str = "Bounded"
+    #consistency_level: str = "Strong"
 
     # BM25 analyzer
     analyzer_type: str = "english"  # mets "french" si supporté chez toi
 
     # HNSW params
-    hnsw_m: int = 16
-    hnsw_ef_construction: int = 200
+    hnsw_m: int = 8 #16 si GPU
+    hnsw_ef_construction: int = 100 #200 si GPU
     metric_dense: str = "COSINE"
 
     # RRF
-    rrf_k: int = 60
+    rrf_k: int = 30 #60 si beaucoup de chunks en VBD
 
     # load robustness
     load_retries: int = 10
@@ -218,6 +220,9 @@ class MilvusHybridVDB:
         schema.add_field(field_name="page_no", datatype=DataType.INT64)
         schema.add_field(field_name="chunk_type", datatype=DataType.VARCHAR, max_length=64)
 
+        schema.add_field(field_name="doc_summary", datatype=DataType.VARCHAR, max_length=65535)
+        schema.add_field(field_name="doc_date", datatype=DataType.VARCHAR, max_length=20)
+
         # sparse output du BM25
         schema.add_field(field_name="sparse", datatype=DataType.SPARSE_FLOAT_VECTOR)
 
@@ -292,6 +297,8 @@ class MilvusHybridVDB:
             "section_title": obj.get("section_title", "") or "",
             "page_no": int(obj.get("page_no", -1)) if obj.get("page_no") is not None else -1,
             "chunk_type": chunk_type,
+            "doc_summary": meta.get("doc_summary", ""),
+            "doc_date": meta.get("doc_date", ""),
         }
 
     # ---------- Ingestion (service style) ----------
@@ -618,9 +625,9 @@ def health():
         "milvus_uri": MILVUS_URI,
         "milvus_ok": milvus_ok,
         "milvus_err": milvus_err,
-        "embedding_source": "HuggingFace (Sentence-Transformers)", # Modifié
-        "embedding_model": HF_MODEL_NAME,                         # Modifié
-        "embed_dim": EMBED_DIM,                                   # Est bien à 768
+        "embedding_source": "HuggingFace (Sentence-Transformers)", 
+        "embedding_model": HF_MODEL_NAME,                        
+        "embed_dim": EMBED_DIM,                                   
     }
 
 
@@ -674,7 +681,7 @@ def delete_collection(req: DeleteCollectionRequest):
         raise
     except Exception:
         raise HTTPException(status_code=500, detail=traceback.format_exc())
-
+    
 @app.post("/collections/stats")
 def collection_stats(req: CollectionStatsRequest):
     try:
@@ -683,55 +690,114 @@ def collection_stats(req: CollectionStatsRequest):
         if not client.has_collection(req.collection):
             raise HTTPException(status_code=404, detail=f"Collection '{req.collection}' introuvable")
 
-        # 1. Récupérer les stats (nombre de lignes)
+        # 1. Stats de base (row_count)
         stats = client.get_collection_stats(req.collection)
+        row_count = int(stats.get("row_count", 0))
 
-        # 2. Récupérer la description de la collection
+        # 2. Récupération de la dimension (ton code actuel est bon)
         desc = client.describe_collection(req.collection)
         actual_dim = None
-        
-        # Extraction robuste de la dimension
-        # Selon les versions, fields est à la racine ou dans 'schema'
         fields = desc.get("fields", []) or desc.get("schema", {}).get("fields", [])
-        
         for field in fields:
-            # Le nom du champ peut être 'name' ou 'field_name'
             fname = field.get("name") or field.get("field_name")
-            
             if fname == "vector":
-                # La dimension peut être dans 'params', 'dim', ou 'params' sous forme de liste
                 params = field.get("params", {})
-                
-                if isinstance(params, dict):
-                    actual_dim = params.get("dim")
-                
-                if actual_dim is None:
-                    actual_dim = field.get("dim")
-                
-                # Cas rare : params est une liste de dicts (anciennes versions)
-                if actual_dim is None and isinstance(params, list):
-                    for p in params:
-                        if p.get("key") == "dim":
-                            actual_dim = p.get("value")
+                actual_dim = params.get("dim") if isinstance(params, dict) else field.get("dim")
                 break
 
-        row_count = stats.get("row_count", 0)
-        try:
-            row_count = int(row_count)
-        except:
-            pass
+        # 3. NOUVEAU : Extraction d'un échantillon des métadonnées (Date et Summary)
+        # On récupère les infos pour visualiser ce qui est en base
+        metadata_sample = []
+        if row_count > 0:
+            # On query les champs spécifiques sans filtre (limit 100 pour l'aperçu)
+            sample_res = client.query(
+                collection_name=req.collection,
+                filter="id != ''", 
+                output_fields=["doc_date", "doc_summary", "source"],
+                limit=100
+            )
+            
+            # On formate pour la visualisation
+            for item in sample_res:
+                metadata_sample.append({
+                    "source": item.get("source"),
+                    "date": item.get("doc_date"),
+                    "summary": item.get("doc_summary")[:200] + "..." if item.get("doc_summary") else None
+                })
 
         return {
             "ok": True, 
             "collection": req.collection, 
             "row_count": row_count, 
             "actual_dim": int(actual_dim) if actual_dim else None,
-            "stats": stats
+            "visualisation": {
+                "total_documents_sampled": len(metadata_sample),
+                "sample": metadata_sample
+            },
+            "raw_stats": stats
         }
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+# @app.post("/collections/stats")
+# def collection_stats(req: CollectionStatsRequest):
+#     try:
+#         client = MilvusClient(uri=MILVUS_URI)
+
+#         if not client.has_collection(req.collection):
+#             raise HTTPException(status_code=404, detail=f"Collection '{req.collection}' introuvable")
+
+#         # 1. Récupérer les stats (nombre de lignes)
+#         stats = client.get_collection_stats(req.collection)
+
+#         # 2. Récupérer la description de la collection
+#         desc = client.describe_collection(req.collection)
+#         actual_dim = None
+        
+#         # Extraction robuste de la dimension
+#         # Selon les versions, fields est à la racine ou dans 'schema'
+#         fields = desc.get("fields", []) or desc.get("schema", {}).get("fields", [])
+        
+#         for field in fields:
+#             # Le nom du champ peut être 'name' ou 'field_name'
+#             fname = field.get("name") or field.get("field_name")
+            
+#             if fname == "vector":
+#                 # La dimension peut être dans 'params', 'dim', ou 'params' sous forme de liste
+#                 params = field.get("params", {})
+                
+#                 if isinstance(params, dict):
+#                     actual_dim = params.get("dim")
+                
+#                 if actual_dim is None:
+#                     actual_dim = field.get("dim")
+                
+#                 # Cas rare : params est une liste de dicts (anciennes versions)
+#                 if actual_dim is None and isinstance(params, list):
+#                     for p in params:
+#                         if p.get("key") == "dim":
+#                             actual_dim = p.get("value")
+#                 break
+
+#         row_count = stats.get("row_count", 0)
+#         try:
+#             row_count = int(row_count)
+#         except:
+#             pass
+
+#         return {
+#             "ok": True, 
+#             "collection": req.collection, 
+#             "row_count": row_count, 
+#             "actual_dim": int(actual_dim) if actual_dim else None,
+#             "stats": stats
+#         }
+#     except HTTPException:
+#         raise
+#     except Exception:
+#         raise HTTPException(status_code=500, detail=traceback.format_exc())
 
 
 @app.post("/upsert")

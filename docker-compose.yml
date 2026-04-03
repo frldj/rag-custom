@@ -42,6 +42,10 @@ services:
     command: ["milvus", "run", "standalone"]
     security_opt:
     - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          memory: 8G
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000

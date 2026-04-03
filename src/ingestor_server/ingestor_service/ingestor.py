@@ -13,12 +13,15 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # -----------------------
 # Configuration par défaut
 # -----------------------
 DEFAULT_CHUNKING_API_URL = os.getenv("CHUNKING_API_URL") #, "http://localhost:8002")
 DEFAULT_VDB_SERVICE_URL = os.getenv("VDB_SERVICE_URL") #, "http://localhost:8003")
-DEFAULT_COLLECTION = os.getenv("VDB_COLLECTION") #, "rag_minist_int_hybrid_custom_embedding_infloat")
+DEFAULT_COLLECTION = os.getenv("VDB_COLLECTION") #, "rag_minist_int_hybrid_custom_embedding_infloat_v2")
 DEFAULT_STATE_DB = os.getenv("INGEST_STATE_DB", "./ingestion_state.db")
 
 MIME_TYPES = {
@@ -81,20 +84,20 @@ def save_state(conn: sqlite3.Connection, file_path: str, md5: str, collection: s
     conn.commit()
 
 # -----------------------
-# Appels API Chunker (FastAPI) - MODIFIÉ
+# Appels API Chunker (FastAPI)
 # -----------------------
 def get_chunks_from_file(
     file_path: Path, 
     chunking_api_url: str, 
     max_chars: int, 
     min_chars: int,
-    strategy: str # Ajout de la stratégie
+    strategy: str 
 ) -> List[Dict[str, Any]]:
     """Appelle l'API FastAPI pour découper le fichier avec les paramètres choisis."""
     params = {
         "max_chars": max_chars,
         "min_chars": min_chars,
-        "strategy": strategy # On passe la stratégie à l'URL
+        "strategy": strategy 
     }
     mime_type = MIME_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
     
@@ -109,6 +112,40 @@ def get_chunks_from_file(
 # -----------------------
 # Appels API VDB (Upsert)
 # -----------------------
+# def ingest_chunks_to_vdb(
+#     chunks: List[Dict[str, Any]], 
+#     vdb_url: str, 
+#     collection: str, 
+#     source_name: str,
+#     batch_size: int,
+#     mode: str
+# ) -> int:
+#     payload_items = []
+#     for chunk in chunks:
+#         payload_items.append({
+#             "id": chunk.get("id") or str(uuid.uuid4()),
+#             "text": chunk.get("text", ""),
+#             "source": source_name,
+#             "page_no": chunk.get("page_no", -1),
+#             "meta": chunk.get("meta", {}),
+#             "chunk_type": chunk.get("meta", {}).get("strategy", "text")
+#         })
+
+#     if not payload_items:
+#         return 0
+
+#     body = {
+#         "collection": collection,
+#         "items": payload_items,
+#         "batch_size": batch_size,
+#         "mode": mode
+#     }
+
+#     with httpx.Client(timeout=600.0) as client:
+#         response = client.post(f"{vdb_url}/upsert", json=body)
+#         response.raise_for_status()
+#         return int(response.json().get("count", 0))
+
 def ingest_chunks_to_vdb(
     chunks: List[Dict[str, Any]], 
     vdb_url: str, 
@@ -131,20 +168,33 @@ def ingest_chunks_to_vdb(
     if not payload_items:
         return 0
 
-    body = {
-        "collection": collection,
-        "items": payload_items,
-        "batch_size": batch_size,
-        "mode": mode
-    }
+    total_inserted = 0
+    
+    # ---- découpe en lots HTTP ---
+    for i in range(0, len(payload_items), batch_size):
+        batch = payload_items[i : i + batch_size]
+        
+        body = {
+            "collection": collection,
+            "items": batch,
+            "batch_size": batch_size,
+            "mode": mode
+        }
 
-    with httpx.Client(timeout=600.0) as client:
-        response = client.post(f"{vdb_url}/upsert", json=body)
-        response.raise_for_status()
-        return int(response.json().get("count", 0))
+        try:
+            with httpx.Client(timeout=600.0) as client:
+                response = client.post(f"{vdb_url}/upsert", json=body)
+                response.raise_for_status()
+                total_inserted += int(response.json().get("count", 0))
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 413:
+                logger.error(f"  [413] Le batch de taille {len(batch)} est trop lourd pour le serveur.")
+            raise e
+
+    return total_inserted
 
 # -----------------------
-# Logique Main - MODIFIÉ
+# Logique Main 
 # -----------------------
 def main():
     parser = argparse.ArgumentParser(description="Ingestion globale : Fichiers -> Chunker -> VDB")
@@ -188,7 +238,7 @@ def main():
                 DEFAULT_CHUNKING_API_URL, 
                 args.max_chars, 
                 args.min_chars,
-                args.strategy # Transmis ici
+                args.strategy 
             )
             logger.info(f"  -> {len(chunks)} chunks générés via {args.strategy}.")
 

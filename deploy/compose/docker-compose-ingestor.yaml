@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # 1. Le service qui gère les opérations sur la base Milvus (Vector DB Service)
+  vdb-server:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    container_name: vdb-server
+    extra_hosts:
+      - "localhost:host-gateway"
+    ports:
+      - "8003:8003"
+    env_file:
+      - ../../.env
+    environment:
+      # OVERWRITE : On pointe vers le container Milvus sur le réseau Docker
+      - MILVUS_URI=http://milvus-standalone:19530
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - TOKENIZERS_PARALLELISM=false
+    networks:
+      - milvus-net
+    restart: unless-stopped
+    command: uvicorn ingestor_server.vdb_service.app_vdb_milvus:app --host 0.0.0.0 --port 8003
+
+  # 2. Le service qui gère l'extraction Docling et le découpage (Chunking Service)
+  chunk-service:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+    container_name: chunk-service
+    extra_hosts:
+    - "localhost:host-gateway"
+    ports:
+      - "8002:8002"
+    env_file:
+      - ../../.env
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '4' # Augmente selon ton processeur (ex: 8 sur un Mac M1/M2)
+    #       memory: 8G
+    environment:
+      # OVERWRITE : On pointe vers l'API VDB-Server qu'on vient de définir ci-dessus
+      - VDB_SERVICE_URL=http://vdb-server:8003
+      - TEI_ENDPOINT=http://localhost:8083
+      # Chemin interne au container pour les modèles Docling
+      - DOCLING_MODELS_PATH=/app/.cache/docling/models
+      - HF_HOME=/app/.cache
+      - TOKENIZERS_PARALLELISM=false
+    volumes:
+      # Optionnel : Montage du cache pour éviter de retélécharger les modèles Docling/HF
+      - ~/.cache/docling/models:/app/.cache/docling/models
+      - ~/.cache/huggingface:/app/.cache/huggingface
+    networks:
+      - milvus-net
+    depends_on:
+      - vdb-server
+    restart: unless-stopped
+    command: uvicorn ingestor_server.ingestor_service.app_chunks:app --host 0.0.0.0 --port 8002
+
+networks:
+  milvus-net:
+    external: true
+    name: milvus
