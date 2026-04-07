@@ -193,9 +193,7 @@ def ingest_chunks_to_vdb(
 
     return total_inserted
 
-# -----------------------
-# Logique Main 
-# -----------------------
+
 def main():
     parser = argparse.ArgumentParser(description="Ingestion globale : Fichiers -> Chunker -> VDB")
     parser.add_argument("path", help="Fichier ou dossier à traiter")

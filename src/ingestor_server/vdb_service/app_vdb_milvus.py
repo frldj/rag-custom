@@ -107,16 +107,13 @@ def safe_primary_id(raw: str, *, max_len: int = 512) -> str:
     return (s[:keep] + "_" + h)[:max_len]
 
 
-# =========================
-# Milvus Adapter (Hybrid + schema v2 strict)
-# =========================
+
 @dataclass
 class MilvusHybridConfig:
     uri: str = MILVUS_URI
     collection: str = "rag_minist_int_hybrid"
     embed_dim: int = EMBED_DIM
 
-    # lifecycle
     drop_if_exists: bool = False
     consistency_level: str = "Bounded"
     #consistency_level: str = "Strong"
@@ -160,7 +157,6 @@ class MilvusHybridVDB:
         self.embed_fn = embed_fn
         self.client = client or MilvusClient(uri=cfg.uri)
 
-    # ---------- Connection / load helpers ----------
     def _reconnect(self) -> None:
         self.client = MilvusClient(uri=self.cfg.uri)
 
@@ -186,7 +182,6 @@ class MilvusHybridVDB:
             f"Impossible de load '{collection_name}' après {self.cfg.load_retries} tentatives: {last_err}"
         ) from last_err
 
-    # ---------- Collection lifecycle ----------
     def ensure_collection(self) -> None:
         name = self.cfg.collection
 
@@ -199,11 +194,9 @@ class MilvusHybridVDB:
 
         schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=True)
 
-        # PK + dense
         schema.add_field(field_name="id", datatype=DataType.VARCHAR, is_primary=True, max_length=512)
         schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=self.cfg.embed_dim)
 
-        # texte indexable (BM25)
         schema.add_field(
             field_name="text",
             datatype=DataType.VARCHAR,
@@ -213,7 +206,6 @@ class MilvusHybridVDB:
             enable_match=True,
         )
 
-        # champs v2
         schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=1024)
         schema.add_field(field_name="section_path", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="section_title", datatype=DataType.VARCHAR, max_length=512)
@@ -223,10 +215,8 @@ class MilvusHybridVDB:
         schema.add_field(field_name="doc_summary", datatype=DataType.VARCHAR, max_length=65535)
         schema.add_field(field_name="doc_date", datatype=DataType.VARCHAR, max_length=20)
 
-        # sparse output du BM25
         schema.add_field(field_name="sparse", datatype=DataType.SPARSE_FLOAT_VECTOR)
 
-        # Function BM25 : text -> sparse
         schema.add_function(
             Function(
                 name="bm25",
@@ -267,7 +257,6 @@ class MilvusHybridVDB:
             )
         self._load_with_retry(self.cfg.collection)
 
-    # ---------- Ingestion helpers ----------
     def _to_record(self, obj: JsonDict, *, max_text: int = 65535) -> JsonDict:
         """
         Version "service": l'objet ne contient PAS vector => on calcule embed.
@@ -301,7 +290,6 @@ class MilvusHybridVDB:
             "doc_date": meta.get("doc_date", ""),
         }
 
-    # ---------- Ingestion (service style) ----------
     def insert(
         self,
         items: Sequence[JsonDict],
@@ -366,7 +354,6 @@ class MilvusHybridVDB:
 
         return self.insert(items, batch_size=batch_size, max_text=max_text, flush=flush)
 
-    # ---------- Ingestion FAST (notebook style) ----------
     def insert_fast(
         self,
         items: Sequence[JsonDict],
@@ -434,7 +421,6 @@ class MilvusHybridVDB:
 
         return total
 
-    # ---------- Retrieval ----------
     def search_dense(
         self,
         query: str,
@@ -694,7 +680,7 @@ def collection_stats(req: CollectionStatsRequest):
         stats = client.get_collection_stats(req.collection)
         row_count = int(stats.get("row_count", 0))
 
-        # 2. Récupération de la dimension (ton code actuel est bon)
+        # 2. Récupération de la dimension 
         desc = client.describe_collection(req.collection)
         actual_dim = None
         fields = desc.get("fields", []) or desc.get("schema", {}).get("fields", [])
@@ -705,8 +691,7 @@ def collection_stats(req: CollectionStatsRequest):
                 actual_dim = params.get("dim") if isinstance(params, dict) else field.get("dim")
                 break
 
-        # 3. NOUVEAU : Extraction d'un échantillon des métadonnées (Date et Summary)
-        # On récupère les infos pour visualiser ce qui est en base
+        # 3. Extraction d'un échantillon des métadonnées (Date et Summary)
         metadata_sample = []
         if row_count > 0:
             # On query les champs spécifiques sans filtre (limit 100 pour l'aperçu)

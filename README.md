@@ -22,9 +22,9 @@ Ports :
 - **RAG service** (`src/rag_server/rag_service_langfuse.py`) : `http://localhost:8004`
 
 Dockerfile : 
-- **Milvus**
-- **Embedding TEI** 
-- **Langfuse** 
+- **Milvus** : `docker-compose.yml` (projet racine)
+- **Embedding TEI** : `deploy/compose/docker-compose-embedding.yaml`
+- **Langfuse** : `https://github.com/langfuse/langfuse.git`
 
 Module :
 - **src/evaluation** : évaluation offline du rag avant déploiement
@@ -34,14 +34,13 @@ Module :
 
 ## Prérequis
 
-- Python 3.10+ recommandé
+- Python 3.11 recommandé
 - Ollama installé et lancé
 - Milvus lancé (standalone recommandé)
 - Modèle Docling disponible 
 - Compte huggingface accessible
 - Docker disponible
 - Langfuse self-hosted
-- 
 - (optionnel) LibreOffice si ingestion de `.docx` via conversion PDF (commande `soffice`)
 
 ---
@@ -66,7 +65,7 @@ Les fichiers Docker sont regroupés dans le dossier `deploy/compose/`.
 
 #### `Dockerfile`
 
-Le conteneur est basé sur `python:3.10-slim` et :
+Le conteneur est basé sur `python:3.11-slim` et :
 
 - définit `/app` comme répertoire de travail
 - installe les dépendances système nécessaires
@@ -244,8 +243,6 @@ python ingestor.py ./docs \
 ou 
 
 ```bash
-python ingestor.py ./pdfs --strategy recursive --batch-size 32
+python ingestor.py ./pdfs --strategy recursive --batch-size 16
 ```
-
-
 

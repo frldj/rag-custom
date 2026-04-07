@@ -197,7 +197,7 @@ from typing import Any, Dict, List, Optional, Literal
 from huggingface_hub import login
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Imports Docling
+
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
@@ -212,7 +212,6 @@ from onnxtr.models import db_mobilenet_v3_large, crnn_mobilenet_v3_large
 from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
 from docling.chunking import HybridChunker
 
-# Imports pour la sérialisation avancée des tableaux
 from docling_core.transforms.chunker.hierarchical_chunker import (
     ChunkingDocSerializer,
     ChunkingSerializerProvider,
@@ -229,7 +228,7 @@ try:
 except ImportError:
     ocrmac = None
 
-# Plus loin dans ton code
+
 if ocrmac:
     # Utiliser l'OCR Mac
     pass
@@ -240,7 +239,7 @@ else:
 logger = logging.getLogger(__name__)
 
 import logging
-# On réduit au silence le warning spécifique des transformers/tokenizers
+# silence le warning spécifique des transformers/tokenizers
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 # Connexion HF si nécessaire
@@ -288,13 +287,6 @@ class MultiFormatDoclingChunker:
             from docling_ocr_onnxtr import OnnxtrOcrOptions
             ocr_options = OnnxtrOcrOptions()
             
-            # Au lieu d'assigner des objets (qui font planter Pydantic), 
-            # on passe les noms des architectures si le plugin le permet, 
-            # ou on laisse par défaut en s'assurant que le plugin est chargé.
-            
-            # Si tu veux vraiment MobileNet V3 Large, la version propre est :
-            # ocr_options.force_full_page_ocr = True # Exemple d'option valide
-            
             pipeline_options.ocr_options = ocr_options
             logger.info("OCR : Plugin ONNXTR activé.")
         except Exception as e:
@@ -326,8 +318,6 @@ class MultiFormatDoclingChunker:
         file_path = Path(file_path)
         current_strategy = strategy or self.default_strategy
         
-        # Note : target_max pourrait être converti en tokens pour l'hybrid 
-        # (ex: target_max // 3) si tu veux que l'argument max_chars pilote l'hybrid.
         
         try:
             result = self.converter.convert(file_path)
@@ -343,14 +333,11 @@ class MultiFormatDoclingChunker:
             if current_strategy == "hybrid":
                 tokenizer_name = os.getenv("EMBEDDING_MODEL_NAME", "intfloat/multilingual-e5-base")
                 
-                # On utilise max_chars pour estimer max_tokens si fourni, 
-                # sinon 420 (valeur optimale e5)
-                #calculated_max_tokens = (max_chars // 3) if max_chars else 420
                 target_tokens = 448
 
                 hybrid_chunker = HybridChunker(
                     tokenizer=tokenizer_name,
-                    max_tokens=target_tokens, #min(calculated_max_tokens, 450), # On ne dépasse pas la limite e5
+                    max_tokens=target_tokens, # On ne dépasse pas la limite e5
                     merge_peers=True,
                     serializer_provider=MDTableSerializerProvider()
                 )
@@ -392,7 +379,7 @@ class MultiFormatDoclingChunker:
                     text=enriched_text,
                     page_no=page_no,
                     meta={
-                        **doc_meta, # <--- On injecte les infos globales
+                        **doc_meta, 
                         "raw_content": raw_text,
                         "breadcrumb": breadcrumb,
                         "token_count": token_count,
@@ -402,7 +389,6 @@ class MultiFormatDoclingChunker:
                 return final_chunks
             
             else:
-                # Logique RECURSIVE par défaut
                 text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=max_chars or self.default_max_chars,
                     chunk_overlap=150,

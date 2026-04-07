@@ -1,6 +1,5 @@
 import logging  
 
-# --- CONFIGURATION DU LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chunking_api")
 
@@ -39,7 +38,7 @@ chunker = MultiFormatDoclingChunker(
     strategy="hybrid" # Stratégie par défaut
 )
 
-# Initialisation du LLM pour le résumé
+
 summarizer_llm = ChatOllama(
     model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"), 
     base_url=os.getenv("OLLAMA_URL"),
@@ -64,11 +63,9 @@ async def generate_real_summary(text: str) -> str:
             Texte : {input_text}""")
         ])
     
-    # On bind le timeout ici si nécessaire
     chain = prompt | summarizer_llm | StrOutputParser()
     
     try:
-        # Utilisation de wait_for pour éviter de bloquer l'API indéfiniment
         summary = await asyncio.wait_for(
             chain.ainvoke({"input_text": truncated_text}), 
             timeout=60.0
@@ -114,7 +111,6 @@ async def create_chunks(
             shutil.copyfileobj(file.file, buffer)
 
         # A. EXTRACTION DU TEXTE BRUT POUR LE RÉSUMÉ
-        # On utilise le convertisseur interne de Docling pour avoir le texte complet
         conversion_res = chunker.converter.convert(tmp_path)
         full_text = conversion_res.document.export_to_markdown()
 
@@ -124,9 +120,6 @@ async def create_chunks(
         # C. DATE DU JOUR (Format ISO pour Milvus)
         today_date = datetime.now().strftime("%Y-%m-%d")
 
-        # On met à jour les paramètres pour cet appel spécifique
-        # Note : on passe les paramètres directement à chunk_file 
-        # pour éviter de réinitialiser la classe entière
         chunks = chunker.chunk_file(
             tmp_path, 
             strategy=strategy,

@@ -23,7 +23,7 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
-    
+
 class AskRequest(BaseModel):
     query: str
     chat_history: List[ChatMessage] = []
@@ -147,28 +147,75 @@ class RagService:
                     unique_hits[doc_id] = entity
         return list(unique_hits.values())
     
+    # async def remote_rerank(self, query: str, hits: List[Any], top_k: int):
+    #     if not hits: return []
+        
+    #     # On prépare des passages enrichis pour le Reranker
+    #     passages = []
+    #     for h in hits:
+    #         meta = h['entity'].get("metadata", {})
+    #         text = h['entity'].get("text", "")
+    #         summary = meta.get("document_summary", "")
+    #         # On combine Résumé + Début du texte pour donner du contexte au Reranker
+    #         combined = f"{summary[:200]}... {text}" 
+    #         passages.append(combined)
+            
+    #     try:
+    #         r = await self.http_client.post(os.getenv("RERANK_URL"), json={"query": query, "passages": passages})
+    #         scores = r.json()["scores"]
+    #         for i, h in enumerate(hits): h['entity']["rerank_score"] = scores[i]
+    #         hits.sort(key=lambda x: x['entity']["rerank_score"], reverse=True)
+    #         return [h['entity'] for h in hits if h['entity']["rerank_score"] > -8.0][:top_k]
+    #     except Exception as e:
+    #         logger.error(f"Rerank Error: {e}")
+    #         return [h['entity'] for h in hits][:top_k]
+
     async def remote_rerank(self, query: str, hits: List[Any], top_k: int):
         if not hits: return []
+
+        # On cible ton serveur de rerank local (le script Python sur le port 8004)
+        rerank_url = "http://localhost:8001/rerank"
         
-        # On prépare des passages enrichis pour le Reranker
-        passages = []
-        for h in hits:
-            meta = h['entity'].get("metadata", {})
-            text = h['entity'].get("text", "")
-            summary = meta.get("document_summary", "")
-            # On combine Résumé + Début du texte pour donner du contexte au Reranker
-            combined = f"{summary[:200]}... {text}" 
-            passages.append(combined)
-            
+        # On extrait les textes des hits de Milvus
+        # Remplace ta ligne passages par celle-ci pour être sûr
+        passages = [str(h.get("text", "")) for h in hits if h.get("text")]
+
+        if not passages:
+            logger.warning("Rerank annulé : aucun texte trouvé dans les hits.")
+            return hits[:top_k]
+        
         try:
-            r = await self.http_client.post(os.getenv("RERANK_URL"), json={"query": query, "passages": passages})
-            scores = r.json()["scores"]
-            for i, h in enumerate(hits): h['entity']["rerank_score"] = scores[i]
-            hits.sort(key=lambda x: x['entity']["rerank_score"], reverse=True)
-            return [h['entity'] for h in hits if h['entity']["rerank_score"] > -8.0][:top_k]
+            # Appel à ton service Python
+            r = await self.http_client.post(
+                rerank_url, 
+                json={
+                    "query": query,
+                    "passages": passages # Attention : clé 'passages' pour ton script
+                },
+                timeout=20.0 # On laisse un peu de temps au M2 pour calculer
+            )
+            r.raise_for_status()
+            
+            # Ton script renvoie {"scores": [float, float, ...]}
+            response_data = r.json()
+            scores = response_data.get("scores", [])
+
+            # On associe chaque score au hit correspondant
+            for i, hit in enumerate(hits):
+                # Si pour une raison X un score manque, on met une valeur très basse
+                hit["rerank_score"] = scores[i] if i < len(scores) else -10.0
+
+            # On trie les hits par score décroissant (le plus pertinent en premier)
+            # Les modèles BGE v2-m3 donnent des scores souvent entre -10 et 5
+            hits.sort(key=lambda x: x.get("rerank_score", -100), reverse=True)
+                
+            # On ne garde que les top_k meilleurs
+            return hits[:top_k]
+            
         except Exception as e:
-            logger.error(f"Rerank Error: {e}")
-            return [h['entity'] for h in hits][:top_k]
+            logger.error(f"Local Rerank Error (Port 8001): {e}")
+            # En cas d'erreur, on renvoie les hits Milvus sans reranking (fallback)
+            return hits[:top_k]
 
     # async def run_pipeline(self, req: Any):
     #     t_start = time.time()
@@ -340,7 +387,8 @@ class RagService:
 
         # 2. Étape rapide : Milvus
         unique_hits = await self.hybrid_retrieval_batch([rewritten], req.top_k_recall)
-        contexts = [h for h in unique_hits][:req.top_k_final]
+        #contexts = [h for h in unique_hits][:req.top_k_final] # Si pas de rerank
+        contexts = await self.remote_rerank(rewritten, unique_hits, req.top_k_final)
 
         if not contexts:
             yield "Désolé, je n'ai trouvé aucune information."

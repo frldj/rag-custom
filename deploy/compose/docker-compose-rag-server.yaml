@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
-  # Service de Reranking
   rerank-server:
+    stop_grace_period: 1s
     build:
       context: ../../
       dockerfile: deploy/compose/Dockerfile
@@ -17,10 +15,11 @@ services:
     networks:
       - milvus-net 
     restart: unless-stopped
-    command: uvicorn ingestor_server.rerank_service:app --host 0.0.0.0 --port 8001
+    command: uvicorn rerank_server.rerank_service:app --host 0.0.0.0 --port 8001
 
-  # Service RAG
+
   rag-server:
+    stop_grace_period: 1s
     build:
       context: ../../
       dockerfile: deploy/compose/Dockerfile
@@ -32,22 +31,15 @@ services:
     env_file:
       - ../../.env
     environment:
-      # --- Communication vers le PREMIER compose ---
       - VDB_SERVICE_URL=http://vdb-server:8003
       - CHUNK_SERVICE_URL=http://chunk-service:8002
-      
-      # --- Communication vers Milvus (Réseau externe) ---
       - MILVUS_URI=http://milvus-standalone:19530
-      
-      # --- Communication INTERNE à ce compose ---
       - RERANK_URL=http://rerank-server:8001/rerank
-      
-      # --- Communication vers mon Mac ---
       - OLLAMA_URL=http://host.docker.internal:11434
     networks:
       - milvus-net
     restart: unless-stopped
-    command: uvicorn ingestor_server.rag_service:app --host 0.0.0.0 --port 8004
+    command: uvicorn rag_server.rag_service_langfuse:app --host 0.0.0.0 --port 8004
 
 networks:
   milvus-net:

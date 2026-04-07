@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
-  # 1. Le service qui gère les opérations sur la base Milvus (Vector DB Service)
   vdb-server:
+    stop_grace_period: 1s
     build:
       context: ../../
       dockerfile: deploy/compose/Dockerfile
@@ -24,8 +22,9 @@ services:
     restart: unless-stopped
     command: uvicorn ingestor_server.vdb_service.app_vdb_milvus:app --host 0.0.0.0 --port 8003
 
-  # 2. Le service qui gère l'extraction Docling et le découpage (Chunking Service)
+
   chunk-service:
+    stop_grace_period: 1s
     build:
       context: ../../
       dockerfile: deploy/compose/Dockerfile
@@ -39,7 +38,7 @@ services:
     # deploy:
     #   resources:
     #     limits:
-    #       cpus: '4' # Augmente selon ton processeur (ex: 8 sur un Mac M1/M2)
+    #       cpus: '4' # Augmente selon ton processeur 
     #       memory: 8G
     environment:
       # OVERWRITE : On pointe vers l'API VDB-Server qu'on vient de définir ci-dessus
@@ -50,7 +49,7 @@ services:
       - HF_HOME=/app/.cache
       - TOKENIZERS_PARALLELISM=false
     volumes:
-      # Optionnel : Montage du cache pour éviter de retélécharger les modèles Docling/HF
+      # Montage du cache pour éviter de retélécharger les modèles Docling/HF
       - ~/.cache/docling/models:/app/.cache/docling/models
       - ~/.cache/huggingface:/app/.cache/huggingface
     networks:
