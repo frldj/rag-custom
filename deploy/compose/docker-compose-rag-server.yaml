@@ -33,9 +33,11 @@ services:
     environment:
       - VDB_SERVICE_URL=http://vdb-server:8003
       - CHUNK_SERVICE_URL=http://chunk-service:8002
+      - TEI_ENDPOINT=http://embedding-ms:80
       - MILVUS_URI=http://milvus-standalone:19530
       - RERANK_URL=http://rerank-server:8001/rerank
       - OLLAMA_URL=http://host.docker.internal:11434
+      - LANGFUSE_BASE_URL=http://host.docker.internal:3000
     networks:
       - milvus-net
     restart: unless-stopped

@@ -43,7 +43,7 @@ services:
     environment:
       # OVERWRITE : On pointe vers l'API VDB-Server qu'on vient de définir ci-dessus
       - VDB_SERVICE_URL=http://vdb-server:8003
-      - TEI_ENDPOINT=http://localhost:8083
+      - TEI_ENDPOINT=http://embedding-ms:80
       # Chemin interne au container pour les modèles Docling
       - DOCLING_MODELS_PATH=/app/.cache/docling/models
       - HF_HOME=/app/.cache

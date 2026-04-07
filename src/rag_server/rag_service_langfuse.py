@@ -174,7 +174,7 @@ class RagService:
         if not hits: return []
 
         # On cible ton serveur de rerank local (le script Python sur le port 8004)
-        rerank_url = "http://localhost:8001/rerank"
+        rerank_url = os.getenv("RERANK_URL") #"http://localhost:8001/rerank"
         
         # On extrait les textes des hits de Milvus
         # Remplace ta ligne passages par celle-ci pour être sûr

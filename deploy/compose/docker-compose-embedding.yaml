@@ -8,7 +8,14 @@ services:
     volumes:
       # On monte le dossier téléchargé sur le Mac vers /data dans le conteneur
       - ~/hf_models/multilingual-e5-base:/data
+    networks:
+      - milvus-net
     command: >
       --model-id /data
       --auto-truncate
       --pooling mean
+
+networks:
+  milvus-net:
+    external: true
+    name: milvus
