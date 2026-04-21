@@ -211,6 +211,7 @@ ocrmac==1.0.0
 ollama==0.6.1
 omegaconf==2.3.0
 onnxruntime==1.23.2
+# onnxruntime-gpu  # ou onnxruntime-gpu si tu as un GPU NVIDIA
 onnxtr==0.8.1
 openai==2.9.0
 opencensus==0.11.4

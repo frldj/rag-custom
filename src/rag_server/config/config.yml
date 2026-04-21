@@ -1,0 +1,30 @@
+models:
+  - type: main
+    engine: ollama
+    model: llama3.1:8b 
+    parameters:
+      base_url: "http://localhost:11434" # URL par défaut d'Ollama
+
+rails:
+  config:
+    # 2. On désactive TOUS les moteurs de dialogue LLM
+    dialog:
+      enabled: false 
+      single_call:
+        enabled: false
+    gliner:
+      server_endpoint: "http://localhost:1235/v1/extract"
+      threshold: 0.5
+      input:
+        entities: ["email", "phone_number", "first_name", "last_name", "address"]
+      output:
+        entities: ["email", "phone_number", "first_name", "last_name", "address"]
+
+  # # Activation des automates de masquage
+  # input:
+  #   flows:
+  #     - gliner mask pii on input
+      
+  # output:
+  #   flows:
+  #     - gliner mask pii on output

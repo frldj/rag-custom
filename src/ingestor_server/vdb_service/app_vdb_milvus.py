@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from pymilvus.exceptions import MilvusException
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -182,6 +184,13 @@ class MilvusHybridVDB:
             f"Impossible de load '{collection_name}' après {self.cfg.load_retries} tentatives: {last_err}"
         ) from last_err
 
+    # On réessaie si c'est une erreur de connexion ou de ressource insuffisante
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=15),
+        retry=retry_if_exception_type((MilvusException, ConnectionError)),
+        before_sleep=lambda retry_state: logger.warning(f"Retrying Milvus... Attempt {retry_state.attempt_number}")
+    )
     def ensure_collection(self) -> None:
         name = self.cfg.collection
 
@@ -289,7 +298,8 @@ class MilvusHybridVDB:
             "doc_summary": meta.get("doc_summary", ""),
             "doc_date": meta.get("doc_date", ""),
         }
-
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     def insert(
         self,
         items: Sequence[JsonDict],

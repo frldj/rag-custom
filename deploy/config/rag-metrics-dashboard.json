@@ -1,0 +1,56 @@
+{
+  "title": "RAG Performance Monitoring",
+  "uid": "rag_perf",
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "title": "Latences Clés (Moyenne ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "lineInterpolation": "smooth" } } },
+      "targets": [
+        { "expr": "(llm_ttft_ms_sum / llm_ttft_ms_count) or on() vector(0)", "legendFormat": "LLM TTFT" },
+        { "expr": "(rag_ttft_ms_sum / rag_ttft_ms_count) or on() vector(0)", "legendFormat": "Total RAG" }
+      ]
+    },
+    {
+      "title": "Volumes de Tokens",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "input_tokens_total", "legendFormat": "Input" },
+        { "expr": "output_tokens_total", "legendFormat": "Output" },
+        { "expr": "total_tokens_total", "legendFormat": "Total" }
+      ]
+    },
+    {
+      "title": "Performance Retrieval (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "expr": "(retrieval_time_ms_sum / retrieval_time_ms_count) or on() vector(0)", "legendFormat": "Milvus" },
+        { "expr": "(context_reranker_time_ms_sum / context_reranker_time_ms_count) or on() vector(0)", "legendFormat": "Reranker" }
+      ]
+    },
+    {
+      "title": "Fiabilité & Qualité",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "rag_hallucinations_total or on() vector(0)", "legendFormat": "Hallucinations" },
+        { "expr": "rag_circuit_breaker_open_total or on() vector(0)", "legendFormat": "Breakers Ouverts" }
+      ]
+    },
+    {
+      "title": "Efficacité du Cache Redis",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "rag_cache_hits_total or on() vector(0)", "legendFormat": "Hits (Succès)" },
+        { "expr": "rag_cache_miss_total or on() vector(0)", "legendFormat": "Miss (Échecs)" }
+      ]
+    }
+  ]
+}

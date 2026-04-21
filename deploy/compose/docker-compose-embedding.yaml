@@ -16,6 +16,8 @@ services:
       --pooling mean
 
 networks:
+  private-ai-net:
+    internal: true 
   milvus-net:
     external: true
     name: milvus

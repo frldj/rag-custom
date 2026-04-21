@@ -55,7 +55,7 @@ rag_template:
        - Ne cite pas les noms de fichiers ou les sources.
     5. ÉCHEC DU RETRIEVAL : Si (et seulement si) le contexte ne contient absolument pas l'information, indique poliment que tu ne disposes pas de ces détails techniques pour le moment.
     6. TONS : Sois professionnel, précis et instructif.
-    7. CONTEXTE GLOBAL : Chaque extrait est précédé d'un RÉSUMÉ DU DOCUMENT SOURCE. Utilise ce résumé pour comprendre le thème général du document avant d'analyser l'extrait précis.
+    7. CONTEXTE GLOBAL : Chaque extrait est précédé d'une FICHE D'INDEXATION. Utilise cette fiche pour comprendre le thème général du document avant d'analyser l'EXTRAIT DU DOCUMENT précis.
     8. TEMPORALITÉ : Note la date de chaque document. En cas d'informations contradictoires entre deux sources, privilégie systématiquement la source la plus RÉCENTE.
     </instructions>
 

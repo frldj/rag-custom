@@ -1,0 +1,65 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.140.0
+    container_name: otel-collector
+    hostname: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ../../config/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "9988:9988" 
+      - "8889:8889" 
+      - "13133:13133" 
+      - "4317:4317" 
+      - "4318:4318" 
+    depends_on:
+      - zipkin
+    networks:
+      - milvus-net # On utilise le réseau commun
+
+  zipkin:
+    image: docker.io/openzipkin/zipkin:3.5.0
+    container_name: zipkin
+    environment:
+      # RÉDUCTION DE LA RAM : 8Go c'est trop pour ton Mac avec Milvus à côté
+      JAVA_OPTS: "-Xms512m -Xmx1g -XX:+ExitOnOutOfMemoryError"
+    ports:
+      - "9411:9411"
+    networks:
+      - milvus-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus-config.yaml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --enable-feature=exemplar-storage
+      - --enable-feature=otlp-write-receiver
+    volumes:
+      - ../../config/prometheus.yaml:/etc/prometheus/prometheus-config.yaml
+    ports:
+      - "9898:9090"
+    networks:
+      - milvus-net
+
+  grafana:
+    container_name: grafana-service
+    image: grafana/grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ../../config/grafana.yaml:/etc/grafana/provisioning/datasources/grafana.yaml
+      - ../../config/grafana-dashboard-provisioning.yaml:/etc/grafana/provisioning/dashboards/grafana-dashboard-provisioning.yaml
+      - ../../config/rag-metrics-dashboard.json:/var/lib/grafana/dashboards/rag-metrics-dashboard.json
+    networks:
+      - milvus-net
+
+networks:
+  milvus-net:
+    external: true
+    name: milvus # Assure-toi que 'docker network ls' affiche bien 'milvus'

@@ -92,11 +92,6 @@ Il s’appuie également sur des services externes/accessibles :
 
 #### Lancement
 
-Allez dans "cd deploy/compose" et lancez :
-
-```bash
-docker compose up --build
-```
 ---
 ### Structure API/Microservices
 
@@ -206,6 +201,49 @@ Test:
 ```bash
 soffice --version
 ```
+## TEI pour Reranker
+
+Installer Rust nativement :
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Git clone ce projet :
+```bash
+https://github.com/huggingface/text-embeddings-inference.git
+```
+
+Dans le projet et lancez :
+```bash
+cargo install --path router -F metal -F accelerate
+```
+
+Lancez le reranker via TEI :
+```bash
+text-embeddings-router --model-id BAAI/bge-reranker-base --port 8084 --auto-truncate
+```
+
+
+ou par script bash lancez : 
+
+```bash
+ chmod +x start_reranker.sh
+ ```
+
+ ```bash
+ ./start_reranker.sh
+ ```bash
+
+## Lancez le service Redis
+
+```bash
+docker run -d --name redis-rag -p 6380:6379 redis
+```
+
+Surveillez la consommation redis : 
+```bash
+docker exec -it redis-rag redis-cli info memory
+```
 
 ## Modèle Ollama
 
@@ -224,7 +262,8 @@ export KMP_DUPLICATE_LIB_OK=TRUE
 uvicorn rerank_service:app --host 0.0.0.0 --port 8001
 uvicorn app_chunks:app --host 0.0.0.0 --port 8002
 uvicorn app_vdb_milvus:app --host 0.0.0.0 --port 8003
-uvicorn rag_service:app --host 0.0.0.0 --port 8004
+uvicorn rag_service:app --host 0.0.0.0 --port 8004 ou export PYTHONPATH=$PYTHONPATH:.                             
+uvicorn src.rag_server.rag_service_telemetry:app --host 0.0.0.0 --port 8004
 ```
 
 
@@ -235,7 +274,7 @@ Script CLI : src/ingestor_server/ingestor.py
 Exemple :
 
 ```bash
-python ingestor.py ./docs \
+python src/ingestor_server/ingestor_service/ingestor.py ./src/ingestor_server/ingestor_service/pdfs \
   --strategy hybrid \
   --max-chars 1200 \
 ```
@@ -243,6 +282,7 @@ python ingestor.py ./docs \
 ou 
 
 ```bash
-python ingestor.py ./pdfs --strategy recursive --batch-size 16
+python src/ingestor_server/ingestor_service/ingestor.py ./src/ingestor_server/ingestor_service/pdfs \ --strategy recursive --batch-size 16
 ```
+
 

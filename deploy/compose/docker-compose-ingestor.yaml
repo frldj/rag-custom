@@ -41,7 +41,6 @@ services:
     #       cpus: '4' # Augmente selon ton processeur 
     #       memory: 8G
     environment:
-      # OVERWRITE : On pointe vers l'API VDB-Server qu'on vient de définir ci-dessus
       - VDB_SERVICE_URL=http://vdb-server:8003
       - TEI_ENDPOINT=http://embedding-ms:80
       # Chemin interne au container pour les modèles Docling

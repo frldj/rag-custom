@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from dotenv import load_dotenv
-load_dotenv()
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
+load_dotenv(ROOT_DIR / ".env")
 
 # -----------------------
 # Configuration par défaut

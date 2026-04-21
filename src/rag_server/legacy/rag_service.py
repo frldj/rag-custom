@@ -1,51 +1,64 @@
-import os
-import yaml
-import sys
-import logging
-import httpx
-from typing import Any, Dict, List, Optional
+import os, yaml, sys, logging, httpx, uuid, time, asyncio
+from typing import Any, List
 from pathlib import Path
 from dotenv import load_dotenv
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from ollama import Client as OllamaClient
 from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
+from nemoguardrails import RailsConfig, LLMRails
+import redis
+import time
+#from langfuse import Langfuse
 
-# --- Configuration des Chemins ---
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-
+# --- Config ---
+current_file = Path(__file__).resolve()
+ROOT_DIR = current_file.parent.parent.parent
 load_dotenv(ROOT_DIR / ".env")
+if str(ROOT_DIR) not in sys.path: sys.path.insert(0, str(ROOT_DIR))
+
 from src.utils.custom_embedding import CustomEmbedder
-
-# --- Configuration Environnement ---
-MILVUS_URI = os.getenv("MILVUS_URI")
-COLL = os.getenv("MILVUS_COLLECTION")
-OLLAMA_URL = os.getenv("OLLAMA_URL")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
-RERANK_URL = os.getenv("RERANK_URL")
-RERANK_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0)
-HF_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL_NAME")
-
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rag_service")
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-PROMPTS_PATH = os.path.join(current_dir, "prompt.yaml")
 
-# =========================
-# Modèles de données API
-# =========================
-class ChatMessage(BaseModel):
-    role: str  # "user" ou "assistant"
+class CircuitBreaker:
+    def __init__(self, name: str, failure_threshold=3, recovery_timeout=30):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.last_failure_time = 0
+        self.state = "CLOSED"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.failure_threshold:
+            if self.state != "OPEN":
+                logger.error(f"CIRCUIT BREAKER OPEN [{self.name}]: Service considéré comme DOWN.")
+                self.state = "OPEN"
+
+    def record_success(self):
+        if self.state != "CLOSED":
+            logger.info(f"✅ CIRCUIT BREAKER CLOSED [{self.name}]: Service rétabli.")
+        self.failures = 0
+        self.state = "CLOSED"
+
+    def can_proceed(self) -> bool:
+        if self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF-OPEN"
+                return True
+            return False
+        return True
+    
+class ChatMessage(BaseModel): 
+    role: str
     content: str
+
 
 class AskRequest(BaseModel):
     query: str
@@ -53,518 +66,413 @@ class AskRequest(BaseModel):
     top_k_final: int = 5
     top_k_recall: int = 60
 
-class ContextItem(BaseModel):
-    id: Any
-    text: str
-    source: Optional[str] = None
-    page_no: Optional[int] = None
-    section_title: Optional[str] = None
-    rerank_score: Optional[float] = None
 
-class AskResponse(BaseModel):
-    answer: str
-    rewritten_query: str
-    contexts: List[ContextItem]
-
-# =========================
-# Chargeur de Prompts YAML
-# =========================
-class YamlPromptLoader:
-    def __init__(self, path: str):
-        with open(path, 'r', encoding='utf-8') as f:
-            self.prompts = yaml.safe_load(f)
-
-    def get_template(self, name: str) -> ChatPromptTemplate:
-        data = self.prompts.get(name)
-        if not data:
-            raise ValueError(f"Prompt template '{name}' non trouvé")
-        messages = []
-        if data.get("system") and data["system"].strip():
-            sys_msg = data["system"].replace("/no_think", "").strip()
-            messages.append(("system", sys_msg))
-        if data.get("human"):
-            messages.append(("human", data["human"]))
-        return ChatPromptTemplate.from_messages(messages)
-
-# =========================
-# Core Service Class
-# =========================
 class RagService:
     def __init__(self):
-        self.milvus = MilvusClient(MILVUS_URI)
-        self.prompt_loader = YamlPromptLoader(PROMPTS_PATH)
-        self.embedder = CustomEmbedder(HF_EMBEDDING_MODEL) 
+        self.milvus_breaker = CircuitBreaker("Milvus", failure_threshold=3, recovery_timeout=60)
+        self.rerank_breaker = CircuitBreaker("Reranker", failure_threshold=3, recovery_timeout=30)
+        self.milvus = MilvusClient(uri=os.getenv("MILVUS_URI"))
+        self.embedder = CustomEmbedder(os.getenv("EMBEDDING_MODEL_NAME"))
+        self.model_name = os.getenv("OLLAMA_MODEL")
+        self.semaphore = asyncio.Semaphore(2) # Max 2 appels LLM simultanés sur Mac
         
-        # Initialisation du LLM principal (Température 0)
-        self.llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_URL, temperature=0.0)
+        
+        self.http_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0))
+        
+        self.llm = ChatOllama(
+            model=self.model_name, 
+            base_url=os.getenv("OLLAMA_URL"), 
+            temperature=0.0,
+            num_predict=512, # Évite les réponses interminables
+            num_ctx=4096     # Plus rapide à charger en mémoire
+        )
 
-        # --- Chaînes LCEL NVIDIA Style ---
-        # 1. Reformulation & Décomposition
-        self.rewriter_chain = self.prompt_loader.get_template("query_rewriter_prompt") | self.llm | StrOutputParser()
-        self.decomposition_chain = self.prompt_loader.get_template("query_decomposition_multiquery_prompt") | self.llm | StrOutputParser()
+        self.redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT")),
+            db=0,
+            decode_responses=True # Important pour récupérer des strings et non des bytes
+        )
 
-        # 2. RAG & Génération
-        self.rag_chain = self.prompt_loader.get_template("rag_template") | self.llm | StrOutputParser()
+        config = RailsConfig.from_path(str(Path(__file__).parent / "config"))
+        self.rails = LLMRails(config)
 
-        # 3. Réflexion & Garde-fous
-        self.relevance_chain = self.prompt_loader.get_template("reflection_relevance_check_prompt") | self.llm | StrOutputParser()
-        self.groundedness_chain = self.prompt_loader.get_template("reflection_groundedness_check_prompt") | self.llm | StrOutputParser()
-        self.regeneration_chain = self.prompt_loader.get_template("reflection_response_regeneration_prompt") | self.llm | StrOutputParser()
+        # self.langfuse = Langfuse(
+        #     public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+        #     secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+        #     host=os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        # )
 
-    def get_embeddings(self, text: str) -> List[float]:
-        return self.embedder(text)
+        with open(Path(__file__).parent / "prompt.yaml", 'r', encoding='utf-8') as f:
+            self.prompts = yaml.safe_load(f)
 
-    def hybrid_retrieval(self, query: str, top_k: int) -> List[Dict]:
-        qvec = self.get_embeddings(query)
-        dense_req = AnnSearchRequest(data=[qvec], anns_field="vector", param={"metric_type": "COSINE", "params": {"ef": 100}}, limit=top_k)
-        sparse_req = AnnSearchRequest(data=[query], anns_field="sparse", param={"metric_type": "BM25"}, limit=top_k)
-        res = self.milvus.hybrid_search(COLL, [sparse_req, dense_req], RRFRanker(k=60), limit=top_k, output_fields=["id", "text", "source", "page_no", "section_title"])
-        return res[0] if res else []
+        # Chaînes
+        self.rewriter_chain = self._build_chain("query_rewriter_prompt")
+        self.decomp_chain = self._build_chain("query_decomposition_multiquery_prompt")
+        self.rag_chain = self._build_chain("rag_template")
+        self.relevance_chain = self._build_chain("reflection_relevance_check_prompt")
+        self.grounded_chain = self._build_chain("reflection_groundedness_check_prompt")
+        self.regen_chain = self._build_chain("reflection_response_regeneration_prompt")
 
-    def remote_rerank(self, query: str, hits: List[Any], top_k: int, threshold: float = 0.35) -> List[Dict]:
-        if not hits: return []
-        passages, meta = [], []
-        for h in hits:
-            ent = h.get('entity')
-            text, title = ent.get("text", ""), ent.get("section_title", "")
-            passages.append(f"{title}\n\n{text}" if title else text)
-            meta.append({"id": ent.get("id"), "text": text, "source": ent.get("source"), "page_no": ent.get("page_no"), "section_title": title})
+    def _build_chain(self, prompt_name: str):
+        data = self.prompts.get(prompt_name)
+        system_content = data["system"].replace("/no_think", "").strip()
+        msgs = [("system", system_content), ("human", data["human"])]
+        return ChatPromptTemplate.from_messages(msgs) | self.llm | StrOutputParser()
+    
+    async def _stream_final_text(self, text: str):
+        """Simule le streaming pour un texte déjà généré et validé."""
+        for chunk in text.split(' '):
+            yield chunk + ' '
+            await asyncio.sleep(0.02) # Petit délai pour l'expérience utilisateur
+    
+    # async def anonymize_text(self, text: str) -> str:
+    #     """Masque les PII en utilisant le serveur GLiNER via NeMo Guardrails."""
+    #     if not text:
+    #         return ""
+    #     try:
+    #         # On force l'exécution du rail de masquage
+    #         result = await self.rails.generate_async(prompt=text)
+    #         return result.content
+    #     except Exception as e:
+    #         logger.error(f"Erreur anonymisation : {e}")
+    #         return "[ANONYMIZATION_ERROR]"
+
+    # async def anonymize_text(self, text: str) -> str:
+    #     """Masque les PII en appelant DIRECTEMENT l'action sans passer par LLMRails.generate."""
+    #     if not text:
+    #         return ""
+    #     try:
+    #         # On passe par le runtime pour exécuter l'action Python pure
+    #         # C'est la méthode la plus rapide (pas de LLM, pas de latence)
+    #         result = await self.rails.runtime.action_dispatcher.execute_action(
+    #             action_name="gliner_mask_pii",
+    #             params={"text": text}
+    #         )
+            
+    #         # Si le dispatcher renvoie une string, on la prend.
+    #         # Sinon on essaye d'extraire la valeur de retour.
+    #         if isinstance(result, str):
+    #             return result
+            
+    #         # Parfois NeMo renvoie un objet ActionResult
+    #         if hasattr(result, 'return_value') and result.return_value:
+    #             return str(result.return_value)
+
+    #         return str(result)
+
+    #     except Exception as e:
+    #         logger.error(f"❌ Erreur anonymisation directe : {e}")
+    #         # En cas de fail, on renvoie une version sécurisée (tronquée) 
+    #         # pour ne pas stopper le processus de log
+    #         return f"[ANON_FAIL] {text[:30]}..."
+
+    async def anonymize_text(self, text: str) -> str:
+        """Masque les PII en fournissant les arguments requis par l'action interne NeMo."""
+        if not text:
+            return ""
+        try:
+            # L'action gliner_mask_pii de NeMo attend : text, source et config
+            # On récupère la config depuis l'instance rails
+            result = await self.rails.runtime.action_dispatcher.execute_action(
+                action_name="gliner_mask_pii",
+                params={
+                    "text": text,
+                    "source": "input", # Obligatoire pour gliner_mask_pii
+                    "config": self.rails.config.rails.config.gliner # On injecte la config GLiNER
+                }
+            )
+            
+            # Gestion du retour (souvent une string après traitement)
+            if isinstance(result, str):
+                return result
+            
+            if hasattr(result, 'return_value') and result.return_value:
+                return str(result.return_value)
+
+            return str(result)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur anonymisation (Arguments manquants réglés) : {e}")
+            # Fallback de sécurité : on renvoie le texte original (ou tronqué) 
+            # pour ne pas bloquer l'envoi vers Langfuse
+            return text
+
+
+    async def log_to_langfuse(self, name: str, input_data: Any, output_data: Any, rel_score: int, metrics: dict):
+        host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        pub_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        sec_key = os.getenv("LANGFUSE_SECRET_KEY")
+        if not pub_key or not sec_key: return
+
+        # --- ÉTAPE RGPD CRITIQUE : Anonymisation avant envoi ---
+        # On extrait les textes bruts
+        raw_query = input_data.get("query", "") if isinstance(input_data, dict) else str(input_data)
+        raw_answer = output_data.get("answer", "") if isinstance(output_data, dict) else str(output_data)
+
+        # On lance l'anonymisation GLiNER en parallèle pour l'input et l'output
+        safe_query, safe_answer = await asyncio.gather(
+            self.anonymize_text(raw_query),
+            self.anonymize_text(raw_answer)
+        )
+
+        trace_id = str(uuid.uuid4())
+        payload = {
+            "batch": [
+                {
+                    "id": str(uuid.uuid4()), 
+                    "type": "trace-create", 
+                    "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
+                    "body": {
+                        "id": trace_id, 
+                        "name": name, 
+                        "input": {"query": safe_query}, # Donnée masquée
+                        "output": {"answer": safe_answer}, # Donnée masquée
+                        "metadata": metrics
+                    }
+                },
+                {
+                    "id": str(uuid.uuid4()), 
+                    "type": "score-create", 
+                    "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
+                    "body": {"traceId": trace_id, "name": "context_relevance", "value": float(rel_score)}
+                }
+            ]
+        }
         
         try:
-            with httpx.Client(timeout=RERANK_HTTP_TIMEOUT) as client:
-                r = client.post(RERANK_URL, json={"query": query, "passages": passages})
-                r.raise_for_status()
-                scores = r.json()["scores"]
-
-            logger.info(f"DEBUG SCORES : {scores}") # Regarde les logs console
-            
-            for m, s in zip(meta, scores): 
-                m["rerank_score"] = float(s)
-            
-            # FILTRAGE SUR SCORES BRUTS :
-            # -2 à +10 : Très pertinent
-            # -5 à -2  : Moyennement pertinent (utile pour le contexte)
-            # < -7     : Hors sujet
-            threshold = -8.0 
-            filtered = [m for m in meta if m["rerank_score"] >= threshold]
-            
-            filtered.sort(key=lambda x: x["rerank_score"], reverse=True)
-            return filtered[:top_k]
+            # On utilise le client HTTP existant
+            await self.http_client.post(f"{host}/api/public/ingestion", json=payload, auth=(pub_key, sec_key), timeout=5.0)
+            logger.info(f"✨ Trace anonymisée envoyée à Langfuse : {name}")
         except Exception as e:
-            logger.warning(f"Rerank failed: {e}")
-            return meta[:top_k]
+            logger.warning(f"Langfuse Error: {e}")
 
-    def format_context(self, contexts: List[Dict]) -> str:
-        if not contexts: return ""
-        return "\n\n".join([f"DOC {i+1}: {c['text']}" for i, c in enumerate(contexts)])
 
-    async def run_pipeline(self, req: AskRequest):
-        # 1. Historique & Reformulation
-        last_messages = req.chat_history[-6:]
-        history_str = "\n".join([f"{'User' if m.role=='user' else 'Assistant'}: {m.content}" for m in last_messages]) or "Pas d'historique."
+
+    async def hybrid_retrieval_batch(self, queries: List[str], top_k: int):
+        qvecs = await self.embedder.embed_documents(queries)
         
-        #rewritten_query = self.rewriter_chain.invoke({"chat_history": history_str, "input": req.query}).strip().split('\n')[0]
-        # Dans run_pipeline, remplace le split actuel par :
-        rewritten_query = self.rewriter_chain.invoke({"chat_history": history_str, "input": req.query})
-        # Nettoyage : on enlève les préfixes courants que le LLM ajoute parfois
-        rewritten_query = rewritten_query.replace("Requête reformulée :", "").replace("Question Réécrite :", "").strip().split('\n')[0]
+        search_requests = []
+        for i, qvec in enumerate(qvecs):
+            search_requests.append(AnnSearchRequest([qvec], "vector", {"metric_type": "COSINE"}, limit=top_k))
+            search_requests.append(AnnSearchRequest([queries[i]], "sparse", {"metric_type": "BM25"}, limit=top_k))
 
-        # 2. Multi-Query (Décomposition) pour augmenter le Recall
-        sub_queries_raw = self.decomposition_chain.invoke({"question": rewritten_query})
-        sub_queries = [line.strip() for line in sub_queries_raw.split('\n') if line.strip() and any(c.isdigit() for c in line[:2])]
-        if not sub_queries: sub_queries = [rewritten_query]
-
-        # 3. Retrieval Hybride Global
-        all_hits = []
-        for sq in sub_queries:
-            all_hits.extend(self.hybrid_retrieval(sq, top_k=req.top_k_recall))
+        res = await asyncio.to_thread(
+            self.milvus.hybrid_search,
+            os.getenv("MILVUS_COLLECTION"),
+            search_requests,
+            RRFRanker(k=30),
+            limit=top_k,
+            output_fields=["text", "doc_date", "doc_summary"]
+        )
         
-        # Déduplication par ID
-        seen_ids, unique_hits = set(), []
-        for h in all_hits:
-            if h['id'] not in seen_ids:
-                unique_hits.append(h)
-                seen_ids.add(h['id'])
+        unique_hits = {}
+        for sublist in res:
+            for hit in sublist:
+                # Milvus renvoie l'ID à la racine du hit, les champs dans 'entity'
+                doc_id = hit.get('id') 
+                if doc_id not in unique_hits:
+                    # On fusionne l'ID et les champs pour que contexts[i].get('text') fonctionne
+                    entity = hit.get('entity', {})
+                    entity['id'] = doc_id 
+                    unique_hits[doc_id] = entity
+        return list(unique_hits.values())
+    
 
-        # 4. Reranking avec Seuil de Confiance
-        reranked_contexts = self.remote_rerank(rewritten_query, unique_hits, top_k=req.top_k_final)
 
-        # 5. Reflection: Relevance Check (Contexte suffisant ?)
-        context_str = self.format_context(reranked_contexts)
-        if reranked_contexts:
-            rel_score = self.relevance_chain.invoke({"query": rewritten_query, "context": context_str})
-            if "0" in rel_score:
-                logger.info("⚠️ Relevance 0 : Contexte jugé inutile.")
-                return {"answer": "Désolé, les documents disponibles ne permettent pas de répondre à votre question.", 
-                        "rewritten_query": rewritten_query, "contexts": []}
+    async def remote_rerank(self, query: str, hits: List[Any], top_k: int):
+        if not hits: return []
 
-        # 6. Génération RAG
-        initial_answer = self.rag_chain.invoke({
-            "context": context_str or "Aucun contexte pertinent.",
-            "chat_history": history_str,
-            "question": req.query
-        })
-
-        # 7. Reflection: Groundedness Check (Vérification Hallucination)
-        ground_score = self.groundedness_chain.invoke({"context": context_str, "response": initial_answer})
+        rerank_url = "http://127.0.0.1:8282/rerank"
+        query_text = str(query).strip()
+        passages = [str(h.get("text", ""))[:2000].strip() for h in hits]
         
-        final_answer = initial_answer
-        if "0" in ground_score:
-            logger.warning("🚨 Hallucination détectée. Régénération en cours...")
-            final_answer = self.regeneration_chain.invoke({"context": context_str, "query": rewritten_query})
+        batch_size = 16
+        
+        # On utilise un client temporaire sans pooling pour éviter les erreurs réseau vides
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            try:
+                for i in range(0, len(passages), batch_size):
+                    batch = passages[i : i + batch_size]
+                    logger.info(f"📡 Envoi batch rerank {i//batch_size + 1}")
+                    
+                    try:
+                        r = await client.post(
+                            rerank_url, 
+                            json={"query": query_text, "texts": batch},
+                            headers={"Connection": "close"} # On demande de fermer après le batch
+                        )
+                        
+                        if r.status_code != 200:
+                            logger.error(f"TEI Error {r.status_code}: {r.text}")
+                            continue
 
-        return {
-            "answer": final_answer,
-            "rewritten_query": rewritten_query,
-            "contexts": reranked_contexts
-        }
+                        batch_results = r.json() 
+                        for res in batch_results:
+                            idx = i + res["index"]
+                            if idx < len(hits):
+                                hits[idx]["rerank_score"] = res.get("score")
 
-# =========================
-# FastAPI App
-# =========================
+                    except Exception as inner_e:
+                        logger.error(f"Erreur sur batch {i}: {type(inner_e).__name__} - {inner_e}")
+
+                hits.sort(key=lambda x: x.get("rerank_score", -100.0), reverse=True)
+                return hits[:top_k]
+                
+            except Exception as e:
+                logger.error(f"Exception globale Rerank : {e}")
+                return hits[:top_k]
+
+    async def run_pipeline_stream(self, req: AskRequest):
+        t_start = time.time()
+
+        # 1. Cache sémantique/exact
+        normalized_query = req.query.strip().lower()
+        cache_key = f"rag_cache:{normalized_query}"
+        try:
+            cached_answer = self.redis_client.get(cache_key)
+            if cached_answer:
+                logger.info(f"🚀 Cache Hit : {normalized_query}")
+                yield cached_answer
+                return
+        except Exception as e:
+            logger.warning(f"Redis Error: {e}")
+
+        # 2. Retrieval direct (On saute la reformulation pour gagner 1-2s de latence)
+        if not self.milvus_breaker.can_proceed():
+            yield "ERREUR : Service indisponible."
+            return
+
+        try:
+            # On utilise directement req.query pour le retrieval
+            unique_hits = await self.hybrid_retrieval_batch([req.query], req.top_k_recall)
+            self.milvus_breaker.record_success()
+        except Exception as e:
+            self.milvus_breaker.record_failure()
+            yield "Erreur lors de la recherche."
+            return
+
+        # Rerank si disponible
+        contexts = unique_hits 
+        if self.rerank_breaker.can_proceed():
+            try:
+                contexts = await self.remote_rerank(req.query, unique_hits, req.top_k_final)
+                self.rerank_breaker.record_success()
+            except Exception:
+                self.rerank_breaker.record_failure()
+
+        if not contexts:
+            yield "Aucune information trouvée."
+            return
+        
+        # 3. Construction du contexte optimisé (Fiches d'indexation uniquement)
+        ctx_str = "\n".join([
+            f"SOURCE {i+1} [Résumé: {c.get('doc_summary', '')}]: {c.get('text', '')}" 
+            for i, c in enumerate(contexts)
+        ])
+
+        history_str = "\n".join([f"{m.role}: {m.content}" for m in req.chat_history[-3:]]) or "Aucun."
+
+
+        # 4. GÉNÉRATION + UNIQUE CHECK (GROUNDEDNESS)
+        final_answer = ""
+        is_grounded = False
+        
+        # Une seule tentative de génération + vérification pour minimiser la latence
+        async with self.semaphore:
+            # Génération de la réponse
+            raw_response = await self.rag_chain.ainvoke({
+                "context": ctx_str, 
+                "chat_history": history_str, 
+                "question": req.query
+            })
+
+            # UNIQUE CHECK : Groundedness (Hallucination)
+            # On utilise {response} et {context} comme défini dans vos prompts
+            grounded_raw = await self.grounded_chain.ainvoke({
+                "context": ctx_str, 
+                "response": raw_response 
+            })
+            
+            # Extraction du score (0, 1 ou 2)
+            score = "".join(filter(str.isdigit, grounded_raw))[:1]
+            
+            if score == "0":
+                logger.warning("Hallucination détectée. Tentative de régénération unique...")
+                final_answer = await self.regen_chain.ainvoke({
+                    "context": ctx_str, 
+                    "query": req.query
+                })
+            else:
+                final_answer = raw_response
+                is_grounded = True
+
+        # 5. STREAMING FINAL
+        async for chunk in self._stream_final_text(final_answer):
+            yield chunk
+
+        # 6. LOGS & CACHE
+        latency = round(time.time() - t_start, 3)
+        if final_answer and "HORS CONTEXTE" not in final_answer.upper():
+            try:
+                self.redis_client.setex(cache_key, 86400, final_answer)
+            except: pass
+
+        # Log asynchrone sécurisé
+        async def safe_log():
+            try:
+                await self.log_to_langfuse(
+                    name="RAG_Fast_Reflective", 
+                    input_data={"query": req.query}, 
+                    output_data={"answer": final_answer}, 
+                    rel_score=1 if is_grounded else 0, 
+                    metrics={"latency": latency, "grounded_score": score}
+                )
+            except Exception as e:
+                logger.error(f"Langfuse Log Error: {e}")
+
+        asyncio.create_task(safe_log())
+
+    async def _finalize(self, start_time, q, rewritten, answer, ctx, rel_score, sub_qs):
+        latency = round(time.time() - start_time, 3)
+        await self.log_to_langfuse("RAG_Final_Optimized", {"query": q, "rewritten": rewritten}, {"answer": answer}, rel_score, {"latency": latency, "docs": len(ctx), "sub_queries": len(sub_qs)})
+        return {"answer": answer, "rewritten_query": rewritten, "contexts": ctx, "latency": latency, "run_id": str(uuid.uuid4())}
+
+
+
 app = FastAPI()
-service: RagService = None
+service = None
 
 @app.on_event("startup")
-def startup():
+async def startup():
     global service
     service = RagService()
 
-@app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest):
-    try:
-        result = await service.run_pipeline(req)
-        return AskResponse(
-            answer=result["answer"],
-            rewritten_query=result["rewritten_query"],
-            contexts=[ContextItem(**c) for c in result["contexts"]]
-        )
-    except Exception as e:
-        logger.error(f"Pipeline Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.on_event("shutdown")
+# async def shutdown():
+#     if service:
+#         await service.http_client.aclose()
 
+@app.on_event("shutdown")
+async def shutdown():
+    if service:
+        # On ferme le client HTTP du service RAG
+        await service.http_client.aclose()
+        # On ferme AUSSI le client HTTP de l'embedder
+        await service.embedder.client.aclose()
+        logger.info("Clients HTTP fermés proprement.")
 
-
-# import os
-# import yaml
-# import sys
-# import logging
-# import httpx
-# from typing import Any, Dict, List, Optional
-# from pathlib import Path
-# from dotenv import load_dotenv
-
-# # =========================================================
-# # 2. IMPORTS DES MODULES (APRÈS AJOUT DU PATH)
-# # =========================================================
-# from fastapi import FastAPI, HTTPException
-# from pydantic import BaseModel
-
-# from langchain_ollama import ChatOllama
-# from langchain_core.prompts import ChatPromptTemplate
-# from langchain_core.output_parsers import StrOutputParser
-# from ollama import Client as OllamaClient
-# from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
-
-# from pathlib import Path
-# ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-
-# if str(ROOT_DIR) not in sys.path:
-#     sys.path.append(str(ROOT_DIR))
-
-# load_dotenv(ROOT_DIR / ".env")
-# from src.utils.custom_embedding import CustomEmbedder
-
-
-# # =========================
-# # 3. CONFIGURATION VIA .ENV
-# # =========================
-# MILVUS_URI = os.getenv("MILVUS_URI") #, "http://localhost:19530")
-# COLL = os.getenv("MILVUS_COLLECTION") #, "rag_minist_int_hybrid_custom_embedding_infloat")
-# OLLAMA_URL = os.getenv("OLLAMA_URL") #, "http://localhost:11434")
-# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL") #, "llama3.2:3b")
-
-# RERANK_URL = os.getenv("RERANK_URL") #, "http://localhost:8001/rerank")
-# RERANK_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=5.0)
-# HF_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL_NAME") #, "intfloat/multilingual-e5-base")
-# #PROMPTS_PATH = "prompt.yaml"
-
-# # Logging
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger("rag_service")
-
-# current_dir = os.path.dirname(os.path.abspath(__file__))
-# PROMPTS_PATH = os.path.join(current_dir, "prompt.yaml")
-
-# logger.info(f"Chargement des prompts depuis : {PROMPTS_PATH}")
-
-# # =========================
-# # Modèles de données API
-# # =========================
-# class ChatMessage(BaseModel):
-#     role: str  # "user" ou "assistant"
-#     content: str
-
-# class AskRequest(BaseModel):
-#     query: str
-#     chat_history: List[ChatMessage] = []
-#     top_k_final: int = 5
-#     top_k_recall: int = 60
-
-# class ContextItem(BaseModel):
-#     id: Any
-#     text: str
-#     source: Optional[str] = None
-#     page_no: Optional[int] = None
-#     section_title: Optional[str] = None
-#     rerank_score: Optional[float] = None
-
-# class AskResponse(BaseModel):
-#     answer: str
-#     rewritten_query: str
-#     contexts: List[ContextItem]
-
-# # =========================
-# # Chargeur de Prompts YAML
-# # =========================
-# class YamlPromptLoader:
-#     def __init__(self, path: str):
-#         with open(path, 'r', encoding='utf-8') as f:
-#             self.prompts = yaml.safe_load(f)
-
-#     def get_template(self, name: str) -> ChatPromptTemplate:
-#         data = self.prompts.get(name)
-#         if not data:
-#             raise ValueError(f"Prompt template '{name}' non trouvé")
-        
-#         messages = []
-#         if data.get("system") and data["system"].strip():
-#             # Nettoyage des balises de contrôle LLM si présentes
-#             sys_msg = data["system"].replace("/no_think", "").strip()
-#             messages.append(("system", sys_msg))
-        
-#         if data.get("human"):
-#             messages.append(("human", data["human"]))
-        
-#         return ChatPromptTemplate.from_messages(messages)
-
-# # =========================
-# # Core Service Class
-# # =========================
-# class RagService:
-#     def __init__(self):
-#         self.milvus = MilvusClient(MILVUS_URI)
-#         self.ollama_client = OllamaClient(host=OLLAMA_URL)
-#         self.prompt_loader = YamlPromptLoader(PROMPTS_PATH)
-#         self.embedder = CustomEmbedder(HF_EMBEDDING_MODEL) 
-        
-#         # Initialisation du LLM (Température 0 pour la précision)
-#         self.llm = ChatOllama(
-#             model=OLLAMA_MODEL,
-#             base_url=OLLAMA_URL,
-#             temperature=0.0,
-#         )
-
-#         # Chaîne LCEL 1: Reformulation (Rewriting)
-#         self.rewriter_chain = (
-#             self.prompt_loader.get_template("query_rewriter_prompt")
-#             | self.llm
-#             | StrOutputParser()
-#         )
-
-#         # Chaîne LCEL 2: Génération Finale (RAG)
-#         self.rag_chain = (
-#             self.prompt_loader.get_template("rag_template")
-#             | self.llm
-#             | StrOutputParser()
-#         )
-
-#     def get_embeddings(self, text: str) -> List[float]:
-#         #res = self.ollama_client.embeddings(model=EMB_MODEL, prompt=text)
-#         #return res["embedding"]
-#         return self.embedder(text)
-
-#     def hybrid_retrieval(self, query: str, top_k: int) -> List[Dict]:
-#         qvec = self.get_embeddings(query)
-#         dense_req = AnnSearchRequest(
-#             data=[qvec], anns_field="vector",
-#             param={"metric_type": "COSINE", "params": {"ef": 100}},
-#             limit=top_k
-#         )
-#         sparse_req = AnnSearchRequest(
-#             data=[query], anns_field="sparse",
-#             param={"metric_type": "BM25"},
-#             limit=top_k
-#         )
-#         res = self.milvus.hybrid_search(
-#             COLL, [sparse_req, dense_req],
-#             RRFRanker(k=60), limit=top_k,
-#             output_fields=["id", "text", "source", "page_no", "section_title"]
-#         )
-#         return res[0] if res else []
-
-#     def remote_rerank(self, query: str, hits: List[Any], top_k: int) -> List[Dict]:
-#         if not hits: return []
-#         passages, meta = [], []
-#         for h in hits:
-#             ent = h.get('entity')
-#             text, title = ent.get("text", ""), ent.get("section_title", "")
-#             passages.append(f"{title}\n\n{text}" if title else text)
-#             meta.append({
-#                 "id": ent.get("id"), "text": text, "source": ent.get("source"),
-#                 "page_no": ent.get("page_no"), "section_title": title
-#             })
-#         try:
-#             with httpx.Client(timeout=RERANK_HTTP_TIMEOUT) as client:
-#                 r = client.post(RERANK_URL, json={"query": query, "passages": passages})
-#                 r.raise_for_status()
-#                 scores = r.json()["scores"]
-#             for m, s in zip(meta, scores): m["rerank_score"] = float(s)
-#             meta.sort(key=lambda x: x["rerank_score"], reverse=True)
-#         except Exception as e:
-#             logger.warning(f"Rerank failed: {e}")
-#         return meta[:top_k]
-
-#     def format_context(self, contexts: List[Dict]) -> str:
-#         if not contexts: return "Aucun document pertinent trouvé."
-#         return "\n\n".join([f"DOC {i+1}: {c['text']}" for i, c in enumerate(contexts)])
-
-#     # async def run_pipeline(self, req: AskRequest):
-#     #     # 1. Limitation de l'historique aux 5 DERNIERS MESSAGES
-#     #     last_messages = req.chat_history[-5:]
-        
-#     #     history_str = ""
-#     #     for m in last_messages:
-#     #         role = "Utilisateur" if m.role == "user" else "Assistant"
-#     #         history_str += f"{role}: {m.content}\n"
-        
-#     #     if not history_str:
-#     #         history_str = "(Aucun échange précédent)"
-
-#     #     # 2. Reformulation (Rewriting)
-#     #     # On passe history_str au rewriter pour qu'il gère les pronoms (il, ce projet, etc.)
-#     #     rewritten_query = self.rewriter_chain.invoke({
-#     #         "chat_history": history_str,
-#     #         "input": req.query
-#     #     })
-#     #     # Nettoyage pour ne garder que la première ligne reformulée
-#     #     rewritten_query = rewritten_query.strip().split('\n')[0]
-
-#     #     # 3. Retrieval + Reranking (avec la query reformulée)
-#     #     hits = self.hybrid_retrieval(rewritten_query, top_k=req.top_k_recall)
-#     #     reranked_contexts = self.remote_rerank(rewritten_query, hits, top_k=req.top_k_final)
-
-#     #     # 4. Génération de la réponse Finale (RAG)
-#     #     context_str = self.format_context(reranked_contexts)
-        
-#     #     # Passage de l'historique réduit à la chaîne RAG pour la mémoire
-#     #     answer = self.rag_chain.invoke({
-#     #         "context": context_str,
-#     #         "chat_history": history_str,
-#     #         "question": req.query
-#     #     })
-
-#     #     return {
-#     #         "answer": answer,
-#     #         "rewritten_query": rewritten_query,
-#     #         "contexts": reranked_contexts
-#     #     }
-
-#     async def run_pipeline(self, req: AskRequest):
-#         """Pipeline RAG complet avec Router, Rewriter et Reranker distant."""
-        
-#         # 1. Préparation de l'historique structuré (fenêtre coulissante de 6 messages)
-#         # On utilise des préfixes clairs pour que le LLM distingue les rôles
-#         last_messages = req.chat_history[-6:]
-#         history_str = ""
-#         for m in last_messages:
-#             prefix = "👤 Utilisateur" if m.role == "user" else "🤖 Assistant"
-#             history_str += f"{prefix}: {m.content}\n"
-        
-#         if not history_str:
-#             history_str = "Début de la conversation."
-
-#         # 2. Router : Est-ce une question technique ou une simple politesse ?
-#         # Si la requête est très courte (ex: "Bonjour", "Merci"), on peut bypasser le RAG
-#         is_greeting = any(word in req.query.lower() for word in ["bonjour", "salut", "merci", "ça va"])
-        
-#         if is_greeting and len(req.query) < 15:
-#             answer = self.llm.invoke(f"Réponds poliment à : {req.query}").content
-#             return {
-#                 "answer": answer,
-#                 "rewritten_query": req.query,
-#                 "contexts": []
-#             }
-
-#         # 3. Reformulation (Rewriting)
-#         # On force le rewriter à produire une requête de recherche optimisée
-#         try:
-#             rewritten_query = self.rewriter_chain.invoke({
-#                 "chat_history": history_str,
-#                 "input": req.query
-#             })
-#             # Nettoyage : on prend la première ligne et on enlève les guillemets éventuels
-#             rewritten_query = rewritten_query.strip().split('\n')[0].replace('"', '')
-#         except Exception as e:
-#             logger.warning(f"Rewriting failed, using original query: {e}")
-#             rewritten_query = req.query
-
-#         # 4. Retrieval Hybride (Milvus : Dense + Sparse)
-#         # On récupère top_k_recall (ex: 60) pour donner du choix au Reranker
-#         hits = self.hybrid_retrieval(rewritten_query, top_k=req.top_k_recall)
-
-#         # 5. Reranking Distant (BGE Reranker)
-#         # C'est ici que la Context Precision va s'améliorer
-#         reranked_contexts = self.remote_rerank(
-#             query=rewritten_query, 
-#             hits=hits, 
-#             top_k=req.top_k_final
-#         )
-
-#         # 6. Génération de la réponse finale avec le contexte filtré
-#         context_str = self.format_context(reranked_contexts)
-        
-#         # On passe la question ORIGINALE au RAG pour garder l'intention de l'utilisateur
-#         # Mais on utilise le CONTEXTE trouvé grâce à la requête REFORMULÉE
-#         answer = self.rag_chain.invoke({
-#             "context": context_str,
-#             "chat_history": history_str,
-#             "question": req.query
-#         })
-
-#         # On retourne tout pour l'évaluation RAGAS
-#         return {
-#             "answer": answer,
-#             "rewritten_query": rewritten_query,
-#             "contexts": reranked_contexts
-#         }
-
-    
-
-# # =========================
-# # FastAPI App
-# # =========================
-# app = FastAPI()
-# service: RagService = None
-
-# @app.on_event("startup")
-# def startup():
-#     global service
-#     service = RagService()
-
-# @app.post("/ask", response_model=AskResponse)
+# @app.post("/ask")
 # async def ask(req: AskRequest):
-#     try:
-#         result = await service.run_pipeline(req)
-#         return AskResponse(
-#             answer=result["answer"],
-#             rewritten_query=result["rewritten_query"],
-#             contexts=[ContextItem(**c) for c in result["contexts"]]
-#         )
-#     except Exception as e:
-#         logger.error(f"Pipeline Error: {e}")
-#         raise HTTPException(status_code=500, detail=str(e))
+#     return await service.run_pipeline(req)
 
-# # if __name__ == "__main__":
-# #     import uvicorn
-# #     uvicorn.run(app, host="0.0.0.0", port=8004)
+from fastapi.responses import StreamingResponse
+import json
+
+@app.post("/ask")
+async def ask(req: AskRequest):
+    # On renvoie un générateur asynchrone
+    return StreamingResponse(
+        service.run_pipeline_stream(req), 
+        media_type="text/event-stream"
+    )

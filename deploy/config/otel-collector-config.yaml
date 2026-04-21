@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=none
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  zipkin:
+    endpoint: "http://zipkin:9411/api/v2/spans"
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    add_metric_suffixes: false
+  debug:
+    verbosity: detailed
+
+processors:
+  batch: {}
+  
+  # Version simplifiée et correcte pour filtrer les healthchecks
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health/ready"'
+        - 'attributes["http.target"] == "/health/ready"'
+
+extensions:
+  health_check: {}
+  zpages: {}
+
+service:
+  extensions: [zpages, health_check]
+  telemetry:
+    logs:
+      level: "info"
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, filter/health]
+      exporters: [zipkin, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

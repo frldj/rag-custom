@@ -220,7 +220,7 @@ logger = logging.getLogger("reranker")
 
 # Optimisation M2 : Détection du GPU Metal (Tahoe supporte MPS partiellement, c'est plus rapide)
 device = "mps" if torch.backends.mps.is_available() else "cpu"
-RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3") 
+RERANK_MODEL = os.getenv("RERANK_MODEL") 
 USE_FP16 = True if device == "mps" else False # FP16 parfait pour le M2
 
 executor = ThreadPoolExecutor(max_workers=1)
