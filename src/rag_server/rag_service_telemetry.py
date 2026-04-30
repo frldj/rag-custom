@@ -114,6 +114,97 @@ class RagService:
         msgs = [("system", system_content), ("human", data["human"])]
         return ChatPromptTemplate.from_messages(msgs) | self.llm | StrOutputParser()
     
+    async def anonymize_text(self, text: str) -> str:
+        """Masque les PII en injectant la config et en spécifiant la source 'output'."""
+        if not text:
+            return ""
+        try:
+            # On passe 'source': 'output' pour que NeMo utilise la config de sortie
+            result = await self.rails.runtime.action_dispatcher.execute_action(
+                action_name="gliner_mask_pii", 
+                params={
+                    "text": text,
+                    "config": self.rails.config,
+                    "source": "output" 
+                }
+            )
+            return str(result)
+        except Exception as e:
+            logger.error(f"Erreur technique anonymisation (output) : {e}")
+            return text
+    
+    async def log_to_langfuse(self, name: str, input_data: Any, output_data: Any, rel_score: int, metrics: dict):
+        pub_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        sec_key = os.getenv("LANGFUSE_SECRET_KEY")
+        host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        
+        if not pub_key or not sec_key:
+            return
+
+        try:
+            q = input_data.get("query", "") if isinstance(input_data, dict) else str(input_data)
+            a = output_data.get("answer", "") if isinstance(output_data, dict) else str(output_data)
+
+            # 1. On récupère les résultats de l'anonymisation
+            res_q, res_a = await asyncio.gather(
+                self.anonymize_text(q),
+                self.anonymize_text(a)
+            )
+
+            # 2. SECURITÉ : Si GLiNER renvoie un dictionnaire, on prend la clé 'tagged_text' 
+            # ou on force la conversion en string.
+            def extract_text(val):
+                if isinstance(val, dict):
+                    return val.get("tagged_text", str(val))
+                return str(val)
+
+            safe_query = extract_text(res_q)
+            safe_answer = extract_text(res_a)
+
+            # 3. Préparation du payload
+            trace_id = str(uuid.uuid4())
+            clean_metrics = {k: (v if isinstance(v, (int, float, str, bool)) else str(v)) for k, v in metrics.items()}
+
+            payload = {
+                "batch": [
+                    {
+                        "id": str(uuid.uuid4()), 
+                        "type": "trace-create", 
+                        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
+                        "body": {
+                            "id": trace_id, 
+                            "name": name, 
+                            "input": {"query": safe_query},
+                            "output": {"answer": safe_answer},
+                            "metadata": clean_metrics
+                        }
+                    },
+                    {
+                        "id": str(uuid.uuid4()), 
+                        "type": "score-create", 
+                        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
+                        "body": {"traceId": trace_id, "name": "groundedness", "value": float(rel_score or 0)}
+                    }
+                ]
+            }
+
+            # 4. Envoi
+            resp = await self.http_client.post(
+                f"{host.rstrip('/')}/api/public/ingestion", 
+                json=payload, 
+                auth=(pub_key, sec_key), 
+                timeout=10.0
+            )
+            
+            if resp.status_code in [200, 201, 207]:
+                logger.info(f"Trace Langfuse OK: {name}")
+            else:
+                logger.error(f"Langfuse Error {resp.status_code}: {resp.text}")
+
+        except Exception as e:
+            # ICI : On affiche l'erreur complète pour comprendre
+            logger.error(f"Erreur critique log_to_langfuse : {type(e).__name__} - {str(e)}")
+    
     async def run_pipeline_stream(self, req: AskRequest):
         self.rag_metrics["api_requests"].add(1, {"status": "started"})
         t_start = time.time()
@@ -123,7 +214,7 @@ class RagService:
         try:
             cached_answer = self.redis_client.get(f"rag_cache:{normalized_query}")
             if cached_answer:
-                logger.info(f"🚀 Cache Hit")
+                logger.info(f"Cache Hit")
                 self.rag_metrics["cache_hits"].add(1)
                 yield cached_answer
                 return
@@ -218,16 +309,29 @@ class RagService:
 
         # 7. Post-process (Cache & Log Langfuse)
         latency = round(time.time() - t_start, 3)
+
+        # On prépare un dictionnaire de métriques détaillé pour Langfuse
+        pipeline_metadata = {
+            "latency": latency,
+            "model": self.model_name,
+            "nb_contexts_retrieved": len(contexts),
+            "is_grounded": is_grounded,
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+            "milvus_status": self.milvus_breaker.state,
+            "rerank_status": self.rerank_breaker.state
+        }
+
         if final_answer:
             try: self.redis_client.setex(f"rag_cache:{normalized_query}", 86400, final_answer)
             except: pass
         
         asyncio.create_task(self.log_to_langfuse(
-            "RAG_Stream_Instrumented", 
-            {"query": req.query}, 
-            {"answer": final_answer}, 
-            1 if is_grounded else 0, 
-            {"latency": latency}
+            name="RAG_Stream_Instrumented", 
+            input_data={"query": req.query}, 
+            output_data={"answer": final_answer}, 
+            rel_score=1 if is_grounded else 0, 
+            metrics=pipeline_metadata 
         ))
 
     async def hybrid_retrieval_batch(self, queries: List[str], top_k: int):
@@ -282,7 +386,7 @@ class RagService:
                         if idx < len(hits):
                             hits[idx]["rerank_score"] = res.get("score")
                 else:
-                    logger.error(f"❌ Rerank Error {r.status_code} sur batch {i}: {r.text}")
+                    logger.error(f"Rerank Error {r.status_code} sur batch {i}: {r.text}")
 
             # Une fois tous les batches finis, on trie
             hits.sort(key=lambda x: x.get("rerank_score", -100.0), reverse=True)
@@ -294,13 +398,11 @@ class RagService:
             return hits[:top_k]
                 
         except Exception as e:
-            logger.error(f"⚠️ Exception Rerank : {e}")
+            logger.error(f"Exception Rerank : {e}")
             self.rerank_breaker.record_failure() # On utilise le breaker en cas de crash
             return hits[:top_k]
 
-    async def log_to_langfuse(self, name: str, input_data: Any, output_data: Any, rel_score: int, metrics: dict):
-        # Ta logique de log Langfuse originale ici
-        pass
+
 
 # --- FastAPI App ---
 app = FastAPI()

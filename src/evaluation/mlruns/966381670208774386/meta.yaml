@@ -1,7 +1,0 @@
-artifact_location: file:///Users/foulhad/repos/ministere_interieur/src/evaluation/mlruns/966381670208774386
-creation_time: 1774961176334
-experiment_id: '966381670208774386'
-last_update_time: 1774961176334
-lifecycle_stage: active
-name: RAG_Ministere_Evaluation
-workspace: default

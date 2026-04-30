@@ -6,17 +6,21 @@ Ce repo contient plusieurs services FastAPI + scripts CLI pour :
 3) répondre via un service RAG (Milvus hybrid + rerank BGE + génération LLM),
 4) exposer un service de rerank BGE via HTTP.
 
-Ce repo contient également plusieurs liaison docker
+Ce repo contient également plusieurs liaison docker :
 1) exposer un service d'embedding via TEI.
 2) exposer un service langfuse en local
 3) lancement de milvus en local.
+
+Ce repo permet également d'effectué :
+1) des évaluation du rag en offline : `src/evaluation`
+2) des finetuning d'embedding : `src/finetuning`
 
 ## Architecture 
 
 Ports : 
 - **Ollama** : `http://localhost:11434`
 - **Milvus** : `http://localhost:19530`
-- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8001`
+- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8084`
 - **Chunking API** (`src/ingestor_server/ingestor_service/app_chunks.py`) : `http://localhost:8002`
 - **VDB service** (`src/ingestor_server/vdb_service/app_vdb_milvus.py`) : `http://localhost:8003`
 - **RAG service** (`src/rag_server/rag_service_langfuse.py`) : `http://localhost:8004`
@@ -25,6 +29,7 @@ Dockerfile :
 - **Milvus** : `docker-compose.yml` (projet racine)
 - **Embedding TEI** : `deploy/compose/docker-compose-embedding.yaml`
 - **Langfuse** : `https://github.com/langfuse/langfuse.git`
+- **Monitoring** : `deploy/compose/monitoring/docker-compose.yaml`
 
 Module :
 - **src/evaluation** : évaluation offline du rag avant déploiement
@@ -34,7 +39,7 @@ Module :
 
 ## Prérequis
 
-- Python 3.11 recommandé
+- Python 3.10+ recommandé
 - Ollama installé et lancé
 - Milvus lancé (standalone recommandé)
 - Modèle Docling disponible 
@@ -52,7 +57,7 @@ Le projet peut être lancé via Docker Compose pour démarrer les différents se
 
 - **Ollama** : `http://localhost:11434`
 - **Milvus** : `http://localhost:19530`
-- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8001`
+- **Rerank service** (`src/rerank_server/rerank_service.py`) : `http://localhost:8084`
 - **Chunking API** (`src/ingestor_server/ingestor_service/app_chunks.py.py`) : `http://localhost:8002`
 - **VDB service** (`src/ingestor_server/vdb_service/app_vdb_milvus.py`) : `http://localhost:8003`
 - **RAG service** (`src/rag_server/rag_service_langfuse.py`) : `http://localhost:8004`
@@ -65,7 +70,7 @@ Les fichiers Docker sont regroupés dans le dossier `deploy/compose/`.
 
 #### `Dockerfile`
 
-Le conteneur est basé sur `python:3.11-slim` et :
+Le conteneur est basé sur `python:3.10-slim` et :
 
 - définit `/app` comme répertoire de travail
 - installe les dépendances système nécessaires
@@ -92,8 +97,14 @@ Il s’appuie également sur des services externes/accessibles :
 
 #### Lancement
 
+Allez dans "cd deploy/compose" et lancez :
+
+```bash
+docker compose up --build
+```
+
 ---
-### Structure API/Microservices
+### Structure API
 
 ### Pré-requis
 
@@ -105,6 +116,39 @@ Avant de lancer le projet, vérifier que :
 4. le réseau Docker **`milvus`** existe
 5. Langfuse est démarré en self hosted
 6. L'embedding TEI est lancé
+
+## TEI pour Reranker
+
+Installer Rust nativement :
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Git clone ce projet :
+```bash
+https://github.com/huggingface/text-embeddings-inference.git
+```
+
+Dans le projet et lancez :
+```bash
+cargo install --path router -F metal -F accelerate
+```
+
+Lancez le reranker via TEI :
+```bash
+text-embeddings-router --model-id BAAI/bge-reranker-base --port 8084 --auto-truncate
+```
+
+
+ou par script bash lancez dans `src/reranker_server`: 
+
+```bash
+ chmod +x start_reranker.sh
+ ```
+
+ ```bash
+ ./start_reranker.sh
+ ```
 
 ## Installation de langfuse
 
@@ -133,15 +177,6 @@ Allez dans deploy/compose et lancez :
 
 ```bash
 docker compose -f docker-compose-embedding.yaml up --build 
-```
-
-
-## Installation modèle docling
-
-il faut télécharger via docling-tools les modèles de traitement :
-
-```bash
-docling-tools models download
 ```
 
 ## Installation de Milvus
@@ -184,6 +219,13 @@ exemple :
 poetry run python ingestor.py
 ```
 
+## Installation modèle docling
+
+il faut télécharger via docling-tools les modèles de traitement :
+
+```bash
+docling-tools models download
+```
 
 ## LibreOffice
 Si Mac:
@@ -201,38 +243,7 @@ Test:
 ```bash
 soffice --version
 ```
-## TEI pour Reranker
 
-Installer Rust nativement :
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-Git clone ce projet :
-```bash
-https://github.com/huggingface/text-embeddings-inference.git
-```
-
-Dans le projet et lancez :
-```bash
-cargo install --path router -F metal -F accelerate
-```
-
-Lancez le reranker via TEI :
-```bash
-text-embeddings-router --model-id BAAI/bge-reranker-base --port 8084 --auto-truncate
-```
-
-
-ou par script bash lancez : 
-
-```bash
- chmod +x start_reranker.sh
- ```
-
- ```bash
- ./start_reranker.sh
- ```bash
 
 ## Lancez le service Redis
 
@@ -255,17 +266,25 @@ ollama pull qwen3-embedding:0.6b
 ollama pull qwen2.5vl:3b
 ```
 
+## Lancez le serveur GliNER (Anonymation PII sur langfuse)
+
+Allez dans `src/rag_server/`et lancez : 
+
+```bash
+python -m gliner_server.server
+```
+
+
 ## Démarrer les services 
 
 ```bash
 export KMP_DUPLICATE_LIB_OK=TRUE
-uvicorn rerank_service:app --host 0.0.0.0 --port 8001
+uvicorn rerank_service:app --host 0.0.0.0 --port 8084
 uvicorn app_chunks:app --host 0.0.0.0 --port 8002
 uvicorn app_vdb_milvus:app --host 0.0.0.0 --port 8003
 uvicorn rag_service:app --host 0.0.0.0 --port 8004 ou export PYTHONPATH=$PYTHONPATH:.                             
 uvicorn src.rag_server.rag_service_telemetry:app --host 0.0.0.0 --port 8004
 ```
-
 
 ## Ingestion (PDF/Words -> chunks -> upsert)
 

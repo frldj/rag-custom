@@ -3,28 +3,55 @@ models:
     engine: ollama
     model: llama3.1:8b 
     parameters:
-      base_url: "http://localhost:11434" # URL par défaut d'Ollama
+      base_url: "http://localhost:11434"
 
 rails:
   config:
-    # 2. On désactive TOUS les moteurs de dialogue LLM
+    # 1. On désactive complètement le moteur de dialogue LLM
+    # Cela évite que NeMo n'essaie de répondre à la place de ton RAG
     dialog:
       enabled: false 
-      single_call:
-        enabled: false
+    
+    # 2. Configuration de GLiNER
+    # Assure-toi que ton serveur GLiNER tourne sur le port 1235
     gliner:
       server_endpoint: "http://localhost:1235/v1/extract"
       threshold: 0.5
+      # Entités que GLiNER doit chercher
       input:
         entities: ["email", "phone_number", "first_name", "last_name", "address"]
       output:
         entities: ["email", "phone_number", "first_name", "last_name", "address"]
 
-  # # Activation des automates de masquage
-  # input:
-  #   flows:
-  #     - gliner mask pii on input
+# 3. On ne définit AUCUN flow (pas de fichiers .co)
+# On va appeler l'action manuellement en Python pour plus de contrôle
+# models:
+#   - type: main
+#     engine: ollama
+#     model: llama3.1:8b 
+#     parameters:
+#       base_url: "http://localhost:11434" # URL par défaut d'Ollama
+
+# rails:
+#   config:
+#     # 2. On désactive TOUS les moteurs de dialogue LLM
+#     dialog:
+#       enabled: false 
+#       single_call:
+#         enabled: false
+#     gliner:
+#       server_endpoint: "http://localhost:1235/v1/extract"
+#       threshold: 0.5
+#       input:
+#         entities: ["email", "phone_number", "first_name", "last_name", "address"]
+#       output:
+#         entities: ["email", "phone_number", "first_name", "last_name", "address"]
+
+#   # # Activation des automates de masquage
+#   # input:
+#   #   flows:
+#   #     - gliner mask pii on input
       
-  # output:
-  #   flows:
-  #     - gliner mask pii on output
+#   # output:
+#   #   flows:
+#   #     - gliner mask pii on output
