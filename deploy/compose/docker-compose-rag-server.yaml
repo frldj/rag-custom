@@ -38,13 +38,14 @@ services:
       - RERANK_URL=http://rerank-server:8001/rerank
       - OLLAMA_URL=http://host.docker.internal:11434
       - LANGFUSE_BASE_URL=http://host.docker.internal:3000
+      - GLINER_SERVER_ENDPOINT=http://host.docker.internal:1235/v1/extract
       - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://otel-collector:4318/v1/traces
       - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://otel-collector:4318/v1/metrics
       - OTEL_SERVICE_NAME=rag-app
     networks:
       - milvus-net
     restart: unless-stopped
-    command: uvicorn rag_server.rag_service_langfuse:app --host 0.0.0.0 --port 8004
+    command: uvicorn rag_server.rag_service_telemetry:app --host 0.0.0.0 --port 8004
 
 networks:
   milvus-net:

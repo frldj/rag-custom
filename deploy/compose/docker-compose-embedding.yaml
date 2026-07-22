@@ -21,3 +21,4 @@ networks:
   milvus-net:
     external: true
     name: milvus
+

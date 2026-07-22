@@ -1,4 +1,4 @@
-import os, yaml, sys, logging, httpx, uuid, time, asyncio
+import os, re, yaml, sys, logging, httpx, time, asyncio
 from typing import Any, List, Optional
 from pathlib import Path
 from dotenv import load_dotenv
@@ -11,6 +11,7 @@ from langchain_core.output_parsers import StrOutputParser
 from pymilvus import MilvusClient, AnnSearchRequest, RRFRanker
 from nemoguardrails import RailsConfig, LLMRails
 import redis
+from langfuse import Langfuse
 
 # --- Imports Observabilité ---
 from opentelemetry import trace
@@ -84,10 +85,10 @@ class RagService:
         self.http_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0))
         
         self.llm = ChatOllama(
-            model=self.model_name, 
-            base_url=os.getenv("OLLAMA_URL"), 
+            model=self.model_name,
+            base_url=os.getenv("OLLAMA_URL"),
             temperature=0.0,
-            num_predict=512,
+            num_predict=int(os.getenv("LLM_MAX_TOKENS", 2048)),
             num_ctx=4096
         )
 
@@ -98,7 +99,25 @@ class RagService:
             decode_responses=True
         )
 
+        pub_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        sec_key = os.getenv("LANGFUSE_SECRET_KEY")
+        langfuse_host = os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        if pub_key and sec_key:
+            self.langfuse = Langfuse(public_key=pub_key, secret_key=sec_key, host=langfuse_host)
+            try:
+                self.langfuse.auth_check()
+                logger.info(f"Langfuse connecté : {langfuse_host}")
+            except Exception as e:
+                logger.error(f"Langfuse auth échoué ({langfuse_host}) : {e} — traces désactivées")
+                self.langfuse = None
+        else:
+            self.langfuse = None
+            logger.warning("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY non définis — traces désactivées")
+
         config = RailsConfig.from_path(str(Path(__file__).parent / "config"))
+        gliner_endpoint = os.getenv("GLINER_SERVER_ENDPOINT")
+        if gliner_endpoint and config.rails.config.gliner:
+            config.rails.config.gliner.server_endpoint = gliner_endpoint
         self.rails = LLMRails(config)
 
         with open(Path(__file__).parent / "prompt.yaml", 'r', encoding='utf-8') as f:
@@ -115,95 +134,50 @@ class RagService:
         return ChatPromptTemplate.from_messages(msgs) | self.llm | StrOutputParser()
     
     async def anonymize_text(self, text: str) -> str:
-        """Masque les PII en injectant la config et en spécifiant la source 'output'."""
         if not text:
             return ""
         try:
-            # On passe 'source': 'output' pour que NeMo utilise la config de sortie
-            result = await self.rails.runtime.action_dispatcher.execute_action(
-                action_name="gliner_mask_pii", 
-                params={
-                    "text": text,
-                    "config": self.rails.config,
-                    "source": "output" 
-                }
+            result, status = await self.rails.runtime.action_dispatcher.execute_action(
+                action_name="gliner_mask_pii",
+                params={"text": text, "config": self.rails.config, "source": "output"}
             )
-            return str(result)
+            if status == "success" and result is not None:
+                if isinstance(result, dict):
+                    return result.get("tagged_text", text)
+                return str(result)
+            return text
         except Exception as e:
-            logger.error(f"Erreur technique anonymisation (output) : {e}")
+            logger.error(f"Erreur anonymisation GLiNER : {e}")
             return text
     
     async def log_to_langfuse(self, name: str, input_data: Any, output_data: Any, rel_score: int, metrics: dict):
-        pub_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-        sec_key = os.getenv("LANGFUSE_SECRET_KEY")
-        host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
-        
-        if not pub_key or not sec_key:
+        if not self.langfuse:
             return
-
         try:
             q = input_data.get("query", "") if isinstance(input_data, dict) else str(input_data)
             a = output_data.get("answer", "") if isinstance(output_data, dict) else str(output_data)
 
-            # 1. On récupère les résultats de l'anonymisation
-            res_q, res_a = await asyncio.gather(
+            safe_query, safe_answer = await asyncio.gather(
                 self.anonymize_text(q),
                 self.anonymize_text(a)
             )
-
-            # 2. SECURITÉ : Si GLiNER renvoie un dictionnaire, on prend la clé 'tagged_text' 
-            # ou on force la conversion en string.
-            def extract_text(val):
-                if isinstance(val, dict):
-                    return val.get("tagged_text", str(val))
-                return str(val)
-
-            safe_query = extract_text(res_q)
-            safe_answer = extract_text(res_a)
-
-            # 3. Préparation du payload
-            trace_id = str(uuid.uuid4())
             clean_metrics = {k: (v if isinstance(v, (int, float, str, bool)) else str(v)) for k, v in metrics.items()}
 
-            payload = {
-                "batch": [
-                    {
-                        "id": str(uuid.uuid4()), 
-                        "type": "trace-create", 
-                        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
-                        "body": {
-                            "id": trace_id, 
-                            "name": name, 
-                            "input": {"query": safe_query},
-                            "output": {"answer": safe_answer},
-                            "metadata": clean_metrics
-                        }
-                    },
-                    {
-                        "id": str(uuid.uuid4()), 
-                        "type": "score-create", 
-                        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
-                        "body": {"traceId": trace_id, "name": "groundedness", "value": float(rel_score or 0)}
-                    }
-                ]
-            }
-
-            # 4. Envoi
-            resp = await self.http_client.post(
-                f"{host.rstrip('/')}/api/public/ingestion", 
-                json=payload, 
-                auth=(pub_key, sec_key), 
-                timeout=10.0
+            trace = self.langfuse.trace(
+                name=name,
+                input={"query": safe_query},
+                output={"answer": safe_answer},
+                metadata=clean_metrics,
             )
-            
-            if resp.status_code in [200, 201, 207]:
-                logger.info(f"Trace Langfuse OK: {name}")
-            else:
-                logger.error(f"Langfuse Error {resp.status_code}: {resp.text}")
+            trace.score(
+                name="groundedness",
+                value=float(rel_score or 0),
+            )
+            await asyncio.to_thread(self.langfuse.flush)
+            logger.info(f"Trace Langfuse OK: {name} (trace_id={trace.id})")
 
         except Exception as e:
-            # ICI : On affiche l'erreur complète pour comprendre
-            logger.error(f"Erreur critique log_to_langfuse : {type(e).__name__} - {str(e)}")
+            logger.error(f"Erreur log_to_langfuse : {type(e).__name__} - {e}")
     
     async def run_pipeline_stream(self, req: AskRequest):
         self.rag_metrics["api_requests"].add(1, {"status": "started"})
@@ -301,11 +275,12 @@ class RagService:
                 if "token_usage_distribution" in self.rag_metrics:
                     self.rag_metrics["token_usage_distribution"].record(in_tokens + out_tokens)
 
-        # 6. Streaming final (La méthode .split(' ') fonctionne maintenant correctement sur la string)
+        # 6. Streaming final — re.split préserve les espaces/newlines sans jamais couper un mot
         if final_answer:
-            for chunk in final_answer.split(' '):
-                yield chunk + ' '
-                await asyncio.sleep(0.01)
+            for token in re.split(r'(\s+)', final_answer):
+                if token:
+                    yield token
+                    await asyncio.sleep(0.01)
 
         # 7. Post-process (Cache & Log Langfuse)
         latency = round(time.time() - t_start, 3)
@@ -423,7 +398,9 @@ async def shutdown():
     if service:
         await service.http_client.aclose()
         await service.embedder.client.aclose()
-        service.redis_client.close() 
+        service.redis_client.close()
+        if service.langfuse:
+            service.langfuse.flush()
 
 @app.post("/ask")
 async def ask(req: AskRequest):
