@@ -53,6 +53,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 logger = logging.getLogger("embedder")
 
+_sync_session: requests.Session | None = None
+
+def _get_sync_session() -> requests.Session:
+    global _sync_session
+    if _sync_session is None:
+        _sync_session = requests.Session()
+    return _sync_session
+
 class CustomEmbedder:
     def __init__(self, model_name: str = None):
         self.tei_url = os.getenv("TEI_ENDPOINT")
@@ -116,6 +124,27 @@ class CustomEmbedder:
 
     async def __call__(self, text: str) -> list[float]:
         return await self.embed_query(text)
+
+    def embed_sync(self, text: str) -> list[float]:
+        """Embedding synchrone — à utiliser dans les contextes non-async (ex: VDB service)."""
+        if self.tei_url:
+            try:
+                resp = _get_sync_session().post(
+                    f"{self.tei_url}/embed",
+                    json={"inputs": [text]},
+                    timeout=20.0,
+                )
+                resp.raise_for_status()
+                return resp.json()[0]
+            except Exception as e:
+                logger.warning(f"Échec TEI sync, bascule locale : {e}")
+
+        if self._local_model is None:
+            from sentence_transformers import SentenceTransformer
+            device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+            logger.info(f"Chargement du modèle local {self.model_name} sur {device}...")
+            self._local_model = SentenceTransformer(self.model_name, device=device)
+        return self._local_model.encode(text, normalize_embeddings=True).tolist()
 
     async def close(self):
         if self._client:

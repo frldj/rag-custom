@@ -306,106 +306,122 @@ class MultiFormatDoclingChunker:
             }
         )
 
-    def chunk_file(
-        self, 
-        file_path: str | Path, 
+    def chunk_from_result(
+        self,
+        result,
+        file_path: str | Path,
         strategy: Optional[str] = None,
         max_chars: Optional[int] = None,
         min_chars: Optional[int] = None,
-        summary: Optional[str] = None,  
+        summary: Optional[str] = None,
         doc_date: Optional[str] = None
     ) -> List[Chunk]:
+        """Chunk a document from an already-converted ConversionResult (avoids re-converting)."""
         file_path = Path(file_path)
         current_strategy = strategy or self.default_strategy
-        
-        
         try:
-            result = self.converter.convert(file_path)
             doc = result.document
+            return self._chunk_doc(
+                doc, file_path, current_strategy, max_chars, min_chars, summary, doc_date
+            )
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement de {file_path}: {e}")
+            raise
+        finally:
+            gc.collect()
 
-            doc_meta = {
-                "file_name": file_path.name,
-                "doc_summary": summary or "Non disponible",
-                "doc_date": doc_date or "unknown",
-                "file_ext": file_path.suffix.lower()
-            }
+    def _chunk_doc(
+        self,
+        doc,
+        file_path: Path,
+        strategy: str,
+        max_chars: Optional[int],
+        min_chars: Optional[int],
+        summary: Optional[str],
+        doc_date: Optional[str],
+    ) -> List[Chunk]:
+        doc_meta = {
+            "file_name": file_path.name,
+            "doc_summary": summary or "Non disponible",
+            "doc_date": doc_date or "unknown",
+            "file_ext": file_path.suffix.lower()
+        }
 
-            if current_strategy == "hybrid":
-                tokenizer_name = os.getenv("EMBEDDING_MODEL_NAME", "intfloat/multilingual-e5-base")
-                
-                target_tokens = 448
+        if strategy == "hybrid":
+            tokenizer_name = os.getenv("EMBEDDING_MODEL_NAME", "intfloat/multilingual-e5-base")
+            hybrid_chunker = HybridChunker(
+                tokenizer=tokenizer_name,
+                max_tokens=448,
+                merge_peers=True,
+                serializer_provider=MDTableSerializerProvider()
+            )
 
-                hybrid_chunker = HybridChunker(
-                    tokenizer=tokenizer_name,
-                    max_tokens=target_tokens, # On ne dépasse pas la limite e5
-                    merge_peers=True,
-                    serializer_provider=MDTableSerializerProvider()
-                )
-                
-                chunks_gen = hybrid_chunker.chunk(doc) 
-                final_chunks = []
+            final_chunks = []
+            for i, c in enumerate(hybrid_chunker.chunk(doc)):
+                raw_text = hybrid_chunker.serialize(c)
+                breadcrumb = " > ".join(c.meta.headings) if c.meta.headings else ""
+                enriched_text = f"passage: {breadcrumb}\n{raw_text}" if breadcrumb else f"passage: {raw_text}"
+                is_table = any(getattr(item, "label", "") == "Table" for item in c.meta.doc_items)
 
-                for i, c in enumerate(chunks_gen):
-                    raw_text = hybrid_chunker.serialize(c)
-                    breadcrumb = " > ".join(c.meta.headings) if c.meta.headings else ""
-                    
-                    if breadcrumb:
-                        enriched_text = f"passage: {breadcrumb}\n{raw_text}"
-                    else:
-                        enriched_text = f"passage: {raw_text}"
+                try:
+                    token_count = len(hybrid_chunker.tokenizer.tokenizer.encode(enriched_text))
+                except Exception:
+                    token_count = 0
 
-                    is_table = any(getattr(item, "label", "") == "Table" for item in c.meta.doc_items)
+                page_no = None
+                try:
+                    if c.meta.doc_items:
+                        page_no = c.meta.doc_items[0].prov[0].page_no
+                except (AttributeError, IndexError):
+                    pass
 
-                    try:
-                        token_count = len(hybrid_chunker.tokenizer.tokenizer.encode(enriched_text))
-                    except Exception:
-                        token_count = 0 
-                    
-                    page_no = None
-                    try:
-                        if c.meta.doc_items:
-                            page_no = c.meta.doc_items[0].prov[0].page_no
-                    except (AttributeError, IndexError):
-                        pass
+                limit_min = min_chars or self.default_min_chars
+                if len(raw_text) < (limit_min // 4) and not is_table:
+                    continue
 
-                    # On utilise min_chars ici pour filtrer les chunks trop petits
-                    limit_min = min_chars or self.default_min_chars
-                    if len(raw_text) < (limit_min // 4) and not is_table:
-                        continue
-
-                    final_chunks.append(Chunk(
+                final_chunks.append(Chunk(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}")),
                     source=file_path.name,
                     text=enriched_text,
                     page_no=page_no,
-                    meta={
-                        **doc_meta, 
-                        "raw_content": raw_text,
-                        "breadcrumb": breadcrumb,
-                        "token_count": token_count,
-                        "is_table": is_table,
-                        }
-                    ))
-                return final_chunks
-            
-            else:
-                text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=max_chars or self.default_max_chars,
-                    chunk_overlap=150,
-                    separators=["\n\n", "\n", ". ", " ", ""],
-                )
-                full_md = doc.export_to_markdown()
-                raw_segments = text_splitter.split_text(full_md)
-                
-                return [
+                    meta={**doc_meta, "raw_content": raw_text, "breadcrumb": breadcrumb,
+                          "token_count": token_count, "is_table": is_table}
+                ))
+            return final_chunks
+
+        else:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=max_chars or self.default_max_chars,
+                chunk_overlap=150,
+                separators=["\n\n", "\n", ". ", " ", ""],
+            )
+            raw_segments = text_splitter.split_text(doc.export_to_markdown())
+            return [
                 Chunk(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path.name}|{i}")),
                     source=file_path.name,
                     text=f"passage: {t}",
-                    meta={**doc_meta, "char_count": len(t), "strategy": "recursive"} # <--- On injecte ici aussi
+                    meta={**doc_meta, "char_count": len(t), "strategy": "recursive"}
                 ) for i, t in enumerate(raw_segments)
-                ]
+            ]
 
+    def chunk_file(
+        self,
+        file_path: str | Path,
+        strategy: Optional[str] = None,
+        max_chars: Optional[int] = None,
+        min_chars: Optional[int] = None,
+        summary: Optional[str] = None,
+        doc_date: Optional[str] = None
+    ) -> List[Chunk]:
+        file_path = Path(file_path)
+        try:
+            result = self.converter.convert(file_path)
+            return self._chunk_doc(
+                result.document, file_path,
+                strategy or self.default_strategy,
+                max_chars, min_chars, summary, doc_date
+            )
         except Exception as e:
             logger.error(f"Erreur lors du traitement de {file_path}: {e}")
             raise

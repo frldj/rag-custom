@@ -110,23 +110,25 @@ async def create_chunks(
         with open(tmp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # A. EXTRACTION DU TEXTE BRUT POUR LE RÉSUMÉ
+        # A. CONVERSION UNIQUE — réutilisée pour le résumé ET le chunking
         conversion_res = chunker.converter.convert(tmp_path)
         full_text = conversion_res.document.export_to_markdown()
 
-        # B. GÉNÉRATION DU VRAI RÉSUMÉ (Async)
+        # B. GÉNÉRATION DU RÉSUMÉ (Async)
         real_summary = await generate_real_summary(full_text)
 
         # C. DATE DU JOUR (Format ISO pour Milvus)
         today_date = datetime.now().strftime("%Y-%m-%d")
 
-        chunks = chunker.chunk_file(
-            tmp_path, 
+        # D. CHUNKING sur le résultat déjà converti (pas de 2ème conversion)
+        chunks = chunker.chunk_from_result(
+            conversion_res,
+            tmp_path,
             strategy=strategy,
             max_chars=max_chars,
             min_chars=min_chars,
             summary=real_summary,
-            doc_date=today_date    
+            doc_date=today_date
         )
 
         return {

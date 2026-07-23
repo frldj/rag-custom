@@ -74,13 +74,7 @@ custom_embedder = CustomEmbedder(HF_MODEL_NAME)
 
 
 def emb_text(text: str) -> List[float]:
-    # text = (text or "")[:MAX_EMB_CHARS]
-    # out = ollama_client.embeddings(model=OLLAMA_EMB_MODEL, prompt=text)
-    # vec = out.get("embedding")
-    # if not isinstance(vec, list) or not vec:
-    #     raise RuntimeError("Embedding Ollama invalide (liste vide / mauvais format).")
-    # return vec
-    return custom_embedder(text)
+    return custom_embedder.embed_sync(text)
 
 
 # def get_embed_dim() -> int:
