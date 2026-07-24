@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install test dependencies
-        run: pip install ruff pytest pytest-asyncio httpx fastapi python-dotenv pydantic
+        run: pip install ruff pytest pytest-asyncio httpx fastapi python-dotenv pydantic python-multipart
 
       - name: Lint
         run: ruff check src/ tests/ --ignore E501,E402
