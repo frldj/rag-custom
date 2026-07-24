@@ -1,10 +1,28 @@
+# Secrets & local state
+.env
+*.db
+ingestion_state.db
+
+# macOS
+.DS_Store
+
+# Docker data volumes
+volumes/
+
+# PDF corpus (use scripts/download_sample_pdfs.sh instead)
+*.pdf
+src/ingestor_server/ingestor_service/pdfs/
+
+# Legacy exploratory code
+src/ingestor_server/ingestor_service/legacy/
+
+# Parse cache
+parse_cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
-
-# Docker data volumes
-volumes/
 
 # C extensions
 *.so

@@ -1,9 +1,9 @@
 [tool.poetry]
-name = "ministere_interieur"
+name = "rag-custom"
 version = "0.1.0"
 package-mode = false
-description = "Système d'ingestion et RAG avec Docling et LangChain"
-authors = ["foulhadj@fr.scc.com"]
+description = "Production RAG platform: FastAPI microservices, Milvus hybrid search, BGE reranking, Langfuse observability"
+authors = ["Feriel Oulhadj"]
 readme = "README.md"
 
 [tool.poetry.dependencies]

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install ruff pytest pytest-asyncio httpx fastapi python-dotenv pydantic
+
+      - name: Lint
+        run: ruff check src/ tests/ --ignore E501,E402
+
+      - name: Tests
+        run: pytest tests/ -v --tb=short -m "not integration"
