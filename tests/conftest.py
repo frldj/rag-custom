@@ -1,6 +1,34 @@
 import os
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
+
+# Stub packages that are only available inside Docker (FlagEmbedding, docling, etc.)
+# so unit tests can import the FastAPI apps without GPU or heavy deps.
+_STUB_PACKAGES = [
+    "FlagEmbedding",
+    "docling",
+    "docling.datamodel",
+    "docling.datamodel.base_models",
+    "docling.datamodel.pipeline_options",
+    "docling.datamodel.accelerator_options",
+    "docling.document_converter",
+    "docling.backend",
+    "docling.backend.docling_parse_v4_backend",
+    "docling.chunking",
+    "docling_ocr_onnxtr",
+    "onnxtr",
+    "onnxtr.models",
+    "docling_core",
+    "docling_core.transforms",
+    "docling_core.transforms.chunker",
+    "docling_core.transforms.chunker.hierarchical_chunker",
+    "docling_core.transforms.serializer",
+    "docling_core.transforms.serializer.markdown",
+    "langchain_ollama",
+]
+for _pkg in _STUB_PACKAGES:
+    sys.modules.setdefault(_pkg, MagicMock())
 
 # Make src/ importable without installing the package
 ROOT = Path(__file__).resolve().parent.parent

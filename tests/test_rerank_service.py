@@ -1,6 +1,7 @@
 """Unit tests for the BGE rerank service (rerank_service.py).
 
-The FlagReranker model is mocked so tests run without GPU or model download.
+The module-level `reranker` instance is patched directly so tests run
+without GPU or model download.
 """
 
 from unittest.mock import MagicMock, patch
@@ -12,14 +13,12 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def rerank_client():
     mock_reranker = MagicMock()
+    mock_reranker.compute_score.return_value = [0.9, 0.3, 0.7]
 
-    with (
-        patch("src.rerank_server.rerank_service.FlagReranker", return_value=mock_reranker),
-        patch("src.rerank_server.rerank_service.torch") as mock_torch,
-    ):
-        mock_torch.backends.mps.is_available.return_value = False
-        mock_reranker.compute_score.return_value = [0.9, 0.3, 0.7]
-
+    # Patch the module-level reranker instance, not the class.
+    # The module is already imported via conftest stubs; patching the instance
+    # is the only reliable way to control what the endpoint uses.
+    with patch("src.rerank_server.rerank_service.reranker", mock_reranker):
         from src.rerank_server.rerank_service import app
 
         yield TestClient(app), mock_reranker

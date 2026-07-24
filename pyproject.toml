@@ -74,6 +74,34 @@ opentelemetry-instrumentation-fastapi = "^0.62b0"
 pytest = "9.0.2"
 black = "^24.0.0"
 
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["src/ingestor_server/ingestor_service/legacy/"]
+
+[tool.ruff.lint]
+# Codes ignored globally: pre-existing patterns in service code that would
+# require deep refactoring (type annotations, broad-except, import ordering).
+ignore = [
+    "I001",    # import sorting — pre-existing across all services
+    "BLE001",  # blind except — intentional in service error handlers
+    "UP006",   # List/Dict → list/dict — pre-existing annotations
+    "UP035",   # deprecated typing imports — pre-existing
+    "UP045",   # Optional[X] → X | None — pre-existing
+    "S110",    # try-except-pass — pre-existing
+    "ASYNC230","B008","DTZ005","E722","EXE001",
+    "PLW1508","RUF010","RUF013","SIM102","SIM210","TRY201",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Files with commented-out legacy code containing unused imports
+"src/utils/docling_chunker.py" = ["F401", "F811", "F541"]
+"src/rerank_server/rerank_service.py" = ["F401"]
+"src/ingestor_server/ingestor_service/app_chunks.py" = ["F401", "UP041"]
+"src/ingestor_server/ingestor_service/ingestor.py" = ["F401", "F811"]
+"src/ingestor_server/vdb_service/app_vdb_milvus.py" = ["F401", "F811", "F541"]
+"src/rag_server/rag_service_telemetry.py" = ["F401", "F541"]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

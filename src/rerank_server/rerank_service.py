@@ -239,12 +239,16 @@ logger.info("Modèle prêt !")
 
 class RerankRequest(BaseModel):
     query: str = Field(..., min_length=1)
-    passages: List[str] = Field(..., min_items=1)
+    passages: List[str] = Field(..., min_length=1)
 
 class RerankResponse(BaseModel):
     scores: List[float]
     model: str
     took_ms: int
+
+@app.get("/health")
+def health():
+    return {"ok": True, "model": RERANK_MODEL}
 
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank(req: RerankRequest):

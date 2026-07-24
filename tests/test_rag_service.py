@@ -4,9 +4,6 @@ Heavy dependencies (Milvus, Ollama, Redis, Langfuse, NeMo Guardrails) are
 mocked so tests run in CI without any external service.
 """
 
-import pytest
-
-
 class TestContextBuilding:
     """Tests the context assembly logic: trimming, ordering, formatting."""
 

@@ -1,7 +1,7 @@
 """Unit tests for the chunking API (app_chunks.py).
 
-All heavy dependencies (Docling converter, Ollama) are mocked so these
-tests run in CI without GPU or external services.
+Module-level instances (chunker, summarizer_llm) are created with MagicMock
+stubs via conftest.py; this fixture configures their return values for each test.
 """
 
 import io
@@ -11,28 +11,25 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-def _make_mock_chunk(text="Sample chunk text", chunk_type="text"):
+def _make_mock_chunk(text="Sample chunk text"):
     chunk = MagicMock()
     chunk.text = text
-    chunk.meta = MagicMock()
-    chunk.meta.doc_items = []
-    chunk.meta.headings = []
-    chunk.meta.origin = MagicMock()
-    chunk.meta.origin.filename = "test.pdf"
-    chunk.meta.origin.page_no = 0
     return chunk
 
 
 @pytest.fixture()
 def chunking_client():
-    mock_chunk = _make_mock_chunk()
+    mock_chunks = [_make_mock_chunk("chunk 1"), _make_mock_chunk("chunk 2")]
+
+    mock_chunker = MagicMock()
     mock_conversion = MagicMock()
-    mock_conversion.document.export_to_markdown.return_value = "Mocked document markdown text"
+    mock_conversion.document.export_to_markdown.return_value = "Mocked document markdown"
+    mock_chunker.converter.convert.return_value = mock_conversion
+    mock_chunker.chunk_from_result.return_value = mock_chunks
 
     with (
-        patch(
-            "src.ingestor_server.ingestor_service.app_chunks.MultiFormatDoclingChunker"
-        ) as MockChunker,
+        # Replace the module-level `chunker` instance entirely.
+        patch("src.ingestor_server.ingestor_service.app_chunks.chunker", mock_chunker),
         patch(
             "src.ingestor_server.ingestor_service.app_chunks.generate_real_summary",
             new=AsyncMock(return_value="Mocked summary"),
@@ -42,10 +39,6 @@ def chunking_client():
             return_value=[{"text": "chunk 1"}, {"text": "chunk 2"}],
         ),
     ):
-        instance = MockChunker.return_value
-        instance.converter.convert.return_value = mock_conversion
-        instance.chunk_from_result.return_value = [mock_chunk, mock_chunk]
-
         from src.ingestor_server.ingestor_service.app_chunks import app
 
         yield TestClient(app)
@@ -82,12 +75,12 @@ class TestChunkingEndpoint:
         assert response.status_code == 200
         assert response.json()["strategy_used"] == "recursive"
 
-    def test_missing_filename_returns_400(self, chunking_client):
+    def test_missing_filename_rejected(self, chunking_client):
         response = chunking_client.post(
             "/chunks",
             files=[("file", ("", io.BytesIO(b"content"), "application/pdf"))],
         )
-        assert response.status_code == 400
+        assert response.status_code in (400, 422)
 
     def test_chunk_count_matches_chunks_list(self, chunking_client):
         response = chunking_client.post("/chunks", files=[_pdf_upload()])

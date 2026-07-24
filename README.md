@@ -8,14 +8,31 @@ Production-grade Retrieval-Augmented Generation system built as independent Fast
 
 ## Architecture
 
-```
-PDF/Word  →  [Chunking API :8002]  →  [VDB Service :8003]  →  Milvus :19530
-                                                                     ↓
-User query →  [RAG Server :8004]  ←  [Rerank Service :8001]  ←  Retrieval
-                    ↓                        ↑
-               Ollama :11434            BGE reranker
-                    ↓
-              Langfuse :3000 (traces)  |  Prometheus/Grafana (metrics)
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        A[PDF / Word] --> B[Chunking API\n:8002 Docling]
+        B --> C[VDB Service\n:8003]
+        C --> D[(Milvus\n:19530)]
+    end
+
+    subgraph Query
+        E[User query] --> F[RAG Server\n:8004]
+        F -->|hybrid search| D
+        D -->|top-K candidates| G[Rerank Service\n:8001 BGE]
+        G -->|ranked passages| F
+        F -->|prompt| H[Ollama\n:11434]
+        H -->|answer| F
+    end
+
+    subgraph Observability
+        F -.->|traces| I[Langfuse\n:3000]
+        F -.->|metrics| J[Prometheus\nGrafana]
+    end
+
+    subgraph Privacy
+        F <-->|PII masking| K[GLiNER server\n:1235]
+    end
 ```
 
 ### Service ports
