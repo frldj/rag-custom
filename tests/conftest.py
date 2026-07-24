@@ -3,10 +3,17 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Stub packages that are only available inside Docker (FlagEmbedding, docling, etc.)
-# so unit tests can import the FastAPI apps without GPU or heavy deps.
+# ---------------------------------------------------------------------------
+# Stub heavy packages unavailable in the CI test environment (no GPU, no Docker).
+# setdefault: only stubs if the real package is not already installed.
+# ---------------------------------------------------------------------------
 _STUB_PACKAGES = [
+    # ML / GPU
+    "torch",
+    "torch.backends",
+    # Reranker
     "FlagEmbedding",
+    # Docling (document parsing)
     "docling",
     "docling.datamodel",
     "docling.datamodel.base_models",
@@ -25,17 +32,29 @@ _STUB_PACKAGES = [
     "docling_core.transforms.chunker.hierarchical_chunker",
     "docling_core.transforms.serializer",
     "docling_core.transforms.serializer.markdown",
+    # LangChain (only the submodules used in the services)
     "langchain_ollama",
+    "langchain_core",
+    "langchain_core.prompts",
+    "langchain_core.output_parsers",
+    # HuggingFace Hub (used in docling_chunker)
+    "huggingface_hub",
+    # Text splitter (used in docling_chunker)
+    "langchain_text_splitters",
 ]
 for _pkg in _STUB_PACKAGES:
     sys.modules.setdefault(_pkg, MagicMock())
 
+# ---------------------------------------------------------------------------
 # Make src/ importable without installing the package
+# ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Minimal env so modules that read os.getenv at import time don't crash
+# ---------------------------------------------------------------------------
+# Minimal env vars so modules that read os.getenv at import time don't crash
+# ---------------------------------------------------------------------------
 os.environ.setdefault("OLLAMA_URL", "http://localhost:11434")
 os.environ.setdefault("MILVUS_URI", "http://localhost:19530")
 os.environ.setdefault("EMBEDDING_DIMENSION", "768")
@@ -57,3 +76,11 @@ os.environ.setdefault("MAX_EMB_CHARS", "8000")
 os.environ.setdefault("LANGFUSE_PUBLIC_KEY", "")
 os.environ.setdefault("LANGFUSE_SECRET_KEY", "")
 os.environ.setdefault("LANGFUSE_BASE_URL", "http://localhost:3000")
+
+# ---------------------------------------------------------------------------
+# Pre-import service modules so `patch("src.x.y.attr", ...)` can always
+# resolve the dotted path (mock.patch resolves via getattr on the parent
+# package, which only works once the submodule is in sys.modules).
+# ---------------------------------------------------------------------------
+import src.rerank_server.rerank_service
+import src.ingestor_server.ingestor_service.app_chunks

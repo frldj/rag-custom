@@ -94,6 +94,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# conftest imports service modules for side effects (pre-loading into sys.modules)
+"tests/conftest.py" = ["F401", "E402"]
 # Files with commented-out legacy code containing unused imports
 "src/utils/docling_chunker.py" = ["F401", "F811", "F541"]
 "src/rerank_server/rerank_service.py" = ["F401"]
